@@ -81,7 +81,7 @@ module top_osd_demo #(
 
     wire [23:0] b_rgb;
     test_pattern_b #(.HACTIVE(HACTIVE), .VACTIVE(VACTIVE)) u_pat_b (
-        .clk(clk), .rst(rst), .x(bg_x), .y(bg_y), .rgb(b_rgb)
+        .clk(clk), .rst(rst), .x(act_x), .y(act_y), .rgb(b_rgb)
     );
 
     // ------------------------------------------------------------------
@@ -158,6 +158,7 @@ module top_osd_demo #(
 
     wire [23:0] trans_rgb;
     transition #(.HACTIVE(HACTIVE)) u_trans (
+        .clk(clk), .rst(rst),
         .rgb_a(src_a), .rgb_b(src_b),
         .x(act_x), .effect(ef_trans), .prog(trans_prog),
         .rgb_out(trans_rgb)
@@ -176,40 +177,61 @@ module top_osd_demo #(
     // ------------------------------------------------------------------
     // 打 2 拍，与菜单输出对齐
     // ------------------------------------------------------------------
+    // transition 内部 2 级流水，param 之后再打 2 拍 -> 视频共晚 4 拍
     reg [23:0] vd1, vd2;
-    reg        hsd1, hsd2, vsd1, vsd2, ded1, ded2;
-    reg [11:0] xd1, xd2, yd1, yd2;
+    reg        hsd1, hsd2, hsd3, hsd4;
+    reg        vsd1, vsd2, vsd3, vsd4;
+    reg        ded1, ded2, ded3, ded4;
+    reg [11:0] xd1, xd2, xd3, xd4;
+    reg [11:0] yd1, yd2, yd3, yd4;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             vd1 <= 24'd0; vd2 <= 24'd0;
-            hsd1 <= 1'b0; hsd2 <= 1'b0;
-            vsd1 <= 1'b0; vsd2 <= 1'b0;
-            ded1 <= 1'b0; ded2 <= 1'b0;
-            xd1 <= 12'd0; xd2 <= 12'd0;
-            yd1 <= 12'd0; yd2 <= 12'd0;
+            hsd1 <= 1'b0; hsd2 <= 1'b0; hsd3 <= 1'b0; hsd4 <= 1'b0;
+            vsd1 <= 1'b0; vsd2 <= 1'b0; vsd3 <= 1'b0; vsd4 <= 1'b0;
+            ded1 <= 1'b0; ded2 <= 1'b0; ded3 <= 1'b0; ded4 <= 1'b0;
+            xd1 <= 12'd0; xd2 <= 12'd0; xd3 <= 12'd0; xd4 <= 12'd0;
+            yd1 <= 12'd0; yd2 <= 12'd0; yd3 <= 12'd0; yd4 <= 12'd0;
         end else begin
             vd1 <= adj_rgb;   vd2 <= vd1;
-            hsd1 <= bg_hs;    hsd2 <= hsd1;
-            vsd1 <= bg_vs;    vsd2 <= vsd1;
-            ded1 <= bg_de;    ded2 <= ded1;
-            xd1 <= act_x;     xd2 <= xd1;
-            yd1 <= act_y;     yd2 <= yd1;
+            hsd1 <= bg_hs;    hsd2 <= hsd1;    hsd3 <= hsd2;    hsd4 <= hsd3;
+            vsd1 <= bg_vs;    vsd2 <= vsd1;    vsd3 <= vsd2;    vsd4 <= vsd3;
+            ded1 <= bg_de;    ded2 <= ded1;    ded3 <= ded2;    ded4 <= ded3;
+            xd1 <= act_x;     xd2 <= xd1;      xd3 <= xd2;      xd4 <= xd3;
+            yd1 <= act_y;     yd2 <= yd1;      yd3 <= yd2;      yd4 <= yd3;
+        end
+    end
+
+    // osd_menu 输出比输入晚 3 拍，再补 1 拍与视频（4 拍）对齐
+    reg [23:0] osd_rgb_d;
+    reg [3:0]  osd_alpha_d;
+    reg        osd_on_d;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            osd_rgb_d   <= 24'd0;
+            osd_alpha_d <= 4'd0;
+            osd_on_d    <= 1'b0;
+        end else begin
+            osd_rgb_d   <= osd_rgb;
+            osd_alpha_d <= osd_alpha;
+            osd_on_d    <= osd_on;
         end
     end
 
     alpha_blend u_blend (
         .vid_rgb (vd2),
-        .osd_rgb (osd_rgb),
-        .alpha   (osd_alpha),
+        .osd_rgb (osd_rgb_d),
+        .alpha   (osd_alpha_d),
         .out_rgb (rgb_out)
     );
 
-    assign hs_out = hsd2;
-    assign vs_out = vsd2;
-    assign de_out = ded2;
-    assign x_out  = xd2;
-    assign y_out  = yd2;
+    assign hs_out = hsd4;
+    assign vs_out = vsd4;
+    assign de_out = ded4;
+    assign x_out  = xd4;
+    assign y_out  = yd4;
 
     assign dbg_prog   = trans_prog;
     assign dbg_effect = ef_trans;

@@ -2,7 +2,7 @@
 //  osd_menu.v —— 调试菜单：全屏半透明遮罩 + 居中面板 + 6 项参数
 //
 //  纯像素域、纯坐标实时生成：不读帧缓存、不占 SDRAM 带宽。
-//  三级流水（地址 -> 字模 -> 合成），输出比输入 x/y 晚 2 个像素。
+//  四级流水（区域 -> 地址 -> 字模 -> 合成），输出比输入 x/y 晚 3 个像素。
 //
 //  按键：key_menu 开合，key_up/key_down 选择，key_ok 改值
 // ============================================================================
@@ -482,7 +482,21 @@ module osd_menu #(
         end
     end
 
-    wire [9:0]  rom_addr = {s0_glyph, s0_frow};
+    // 字模索引先打一拍再送 ROM：把"区域比较 + 取字函数"从 BRAM 地址端拆开
+    reg [5:0] s0a_glyph;
+    reg [3:0] s0a_frow;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s0a_glyph <= 6'd37;
+            s0a_frow  <= 4'd0;
+        end else begin
+            s0a_glyph <= s0_glyph;
+            s0a_frow  <= s0_frow;
+        end
+    end
+
+    wire [9:0]  rom_addr = {s0a_glyph, s0a_frow};
     wire [15:0] rom_dout;
 
     font_rom u_font_rom (
@@ -491,7 +505,30 @@ module osd_menu #(
         .dout (rom_dout)
     );
 
-    wire rom_bit = rom_dout[15 - s1_fcol];
+    // 标志位再补一拍，与 BRAM 输出同拍
+    reg        s2_text;
+    reg [3:0]  s2_fcol;
+    reg [23:0] s2_tcolor;
+    reg [23:0] s2_base_rgb;
+    reg [3:0]  s2_base_alpha;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s2_text       <= 1'b0;
+            s2_fcol       <= 4'd0;
+            s2_tcolor     <= 24'd0;
+            s2_base_rgb   <= 24'd0;
+            s2_base_alpha <= 4'd0;
+        end else begin
+            s2_text       <= s1_text;
+            s2_fcol       <= s1_fcol;
+            s2_tcolor     <= s1_tcolor;
+            s2_base_rgb   <= s1_base_rgb;
+            s2_base_alpha <= s1_base_alpha;
+        end
+    end
+
+    wire rom_bit = rom_dout[15 - s2_fcol];
 
     // ------------------------------------------------------------------
     // 第三级：合成输出（比 x/y 晚 2 拍）
@@ -501,14 +538,14 @@ module osd_menu #(
             osd_on    <= 1'b0;
             osd_rgb   <= 24'd0;
             osd_alpha <= 4'd0;
-        end else if (s1_text && rom_bit) begin
+        end else if (s2_text && rom_bit) begin
             osd_on    <= 1'b1;
-            osd_rgb   <= s1_tcolor;
+            osd_rgb   <= s2_tcolor;
             osd_alpha <= 4'd8;
         end else begin
-            osd_on    <= (s1_base_alpha != 4'd0);
-            osd_rgb   <= s1_base_rgb;
-            osd_alpha <= s1_base_alpha;
+            osd_on    <= (s2_base_alpha != 4'd0);
+            osd_rgb   <= s2_base_rgb;
+            osd_alpha <= s2_base_alpha;
         end
     end
 

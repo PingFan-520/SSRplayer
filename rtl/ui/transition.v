@@ -5,6 +5,12 @@
 //          2=WIPE 硬边擦除   3=CUT   直接切换
 //  prog  : 0..255，0 全 A，255 全 B
 //
+//  时序：输出比输入晚 2 拍。
+//    第一级：比较坐标 + 像素打拍（把计数器减法从乘法前面拆开）
+//    第二级：混合 + 输出寄存器
+//    split_x 由 prog 预先算好并打一拍（prog 只在帧首变），
+//    像素通路上不再有 8x12 乘法。
+//
 //  注：SLIDE/WIPE 按屏幕坐标做边界选择，不做内容平移（真平移需要行缓冲）。
 // ============================================================================
 `timescale 1ns / 1ps
@@ -12,6 +18,8 @@
 module transition #(
     parameter integer HACTIVE = 1280
 )(
+    input  wire        clk,
+    input  wire        rst,
     input  wire [23:0] rgb_a,
     input  wire [23:0] rgb_b,
     input  wire [11:0] x,
@@ -20,12 +28,11 @@ module transition #(
     output reg  [23:0] rgb_out
 );
 
-    // ---------------- FADE ----------------
     function [7:0] mix8;
         input [7:0] a;
         input [7:0] b;
         input [7:0] p;
-        reg signed [8:0] d;
+        reg signed [8:0]  d;
         reg signed [17:0] pr;
         reg signed [9:0]  s;
         begin
@@ -38,41 +45,63 @@ module transition #(
         end
     endfunction
 
-    wire [23:0] fade_rgb = { mix8(rgb_a[23:16], rgb_b[23:16], prog),
-                             mix8(rgb_a[15:8],  rgb_b[15:8],  prog),
-                             mix8(rgb_a[7:0],   rgb_b[7:0],   prog) };
-
-    // ---------------- 边界推进 ----------------
+    // ---------------- 边界预计算 ----------------
     // A 占左边、B 从右侧推入：prog=0 -> split=HACTIVE（全 A），
     // prog=255 -> split≈0（全 B），与 FADE 的语义一致
     wire [19:0] split_p = prog * HACTIVE;
-    wire [11:0] split_x = HACTIVE[11:0] - split_p[19:8];
 
-    // SLIDE：32 像素软边
-    wire [12:0] pos32 = {1'b0, x} - {1'b0, split_x};
-    reg  [23:0] slide_rgb;
-    always @(*) begin
-        if (x < split_x)
-            slide_rgb = rgb_a;
-        else if (x < split_x + 12'd32)
-            // 软边：按位置线性混合，alpha = 偏移 x 8
-            slide_rgb = { mix8(rgb_a[23:16], rgb_b[23:16], {pos32[4:0], 3'b000}),
-                          mix8(rgb_a[15:8],  rgb_b[15:8],  {pos32[4:0], 3'b000}),
-                          mix8(rgb_a[7:0],   rgb_b[7:0],   {pos32[4:0], 3'b000}) };
-        else
-            slide_rgb = rgb_b;
+    reg [11:0] split_x;
+    always @(posedge clk or posedge rst) begin
+        if (rst) split_x <= HACTIVE[11:0];
+        else     split_x <= HACTIVE[11:0] - split_p[19:8];
     end
 
-    // WIPE：硬边
-    wire [23:0] wipe_rgb = (x < split_x) ? rgb_a : rgb_b;
+    // ---------------- 第一级：比较 + 打拍 ----------------
+    wire [12:0] pos32 = {1'b0, x} - {1'b0, split_x};
 
+    reg [23:0] a_r, b_r;
+    reg        above_r;     // x < split_x
+    reg        inedge_r;    // 落在 32px 软边内
+    reg [4:0]  pos5_r;      // 软边内偏移
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            a_r      <= 24'd0;
+            b_r      <= 24'd0;
+            above_r  <= 1'b1;
+            inedge_r <= 1'b0;
+            pos5_r   <= 5'd0;
+        end else begin
+            a_r      <= rgb_a;
+            b_r      <= rgb_b;
+            above_r  <= (x < split_x);
+            inedge_r <= (x >= split_x) && (x < split_x + 12'd32);
+            pos5_r   <= pos32[4:0];
+        end
+    end
+
+    // ---------------- 第二级：混合 ----------------
+    wire [23:0] fade_rgb = { mix8(a_r[23:16], b_r[23:16], prog),
+                             mix8(a_r[15:8],  b_r[15:8],  prog),
+                             mix8(a_r[7:0],   b_r[7:0],   prog) };
+
+    wire [23:0] slide_rgb = { mix8(a_r[23:16], b_r[23:16], {pos5_r, 3'b000}),
+                              mix8(a_r[15:8],  b_r[15:8],  {pos5_r, 3'b000}),
+                              mix8(a_r[7:0],   b_r[7:0],   {pos5_r, 3'b000}) };
+
+    reg [23:0] mix_rgb;
     always @(*) begin
         case (effect)
-            2'd0:    rgb_out = fade_rgb;
-            2'd1:    rgb_out = slide_rgb;
-            2'd2:    rgb_out = wipe_rgb;
-            default: rgb_out = (prog < 8'd128) ? rgb_a : rgb_b;
+            2'd0:    mix_rgb = fade_rgb;
+            2'd1:    mix_rgb = above_r ? a_r : (inedge_r ? slide_rgb : b_r);
+            2'd2:    mix_rgb = above_r ? a_r : b_r;
+            default: mix_rgb = (prog < 8'd128) ? a_r : b_r;
         endcase
+    end
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) rgb_out <= 24'd0;
+        else     rgb_out <= mix_rgb;
     end
 
 endmodule
