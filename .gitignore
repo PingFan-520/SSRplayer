@@ -1,0 +1,29 @@
+# ---- TD 综合/布局布线产物 ----
+prj/**/*_Runs/
+prj/log/
+*.log
+*.logw
+*.db
+*.timing
+*.ts
+*.area
+*.qor
+*.bit
+*.bid
+*.prj
+
+# ---- 仿真中间产物 ----
+sim/*.ppm
+sim/work/
+sim/lint/
+sim/transcript
+
+# ---- 厂商参考工程与手册（体积大，不入库）----
+全国大学生嵌入式芯片与系统设计竞赛*/
+*.pdf
+
+# ---- 本地工作数据 ----
+.workbuddy/
+
+# ---- Office 临时文件 ----
+~$*

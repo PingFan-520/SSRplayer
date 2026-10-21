@@ -1,0 +1,52 @@
+// ============================================================================
+//  cfg_latch.v —— 参数影子寄存器：只在 cfg_commit（帧首单拍）提交
+//
+//  菜单里的按键随时可能落下，若参数立刻改变，当前这一帧会被"撕开"
+//  （上半帧还是旧亮度、下半帧已经是新亮度）。这里把菜单写出的
+//  cfg_* 先存一份影子，等 vsync 边界再统一生效。
+// ============================================================================
+`timescale 1ns / 1ps
+
+module cfg_latch (
+    input  wire       clk,
+    input  wire       rst,
+    input  wire       commit,        // 帧首单拍
+
+    input  wire [1:0] in_trans,
+    input  wire [3:0] in_bright,
+    input  wire [3:0] in_contrast,
+    input  wire [1:0] in_scale,
+    input  wire       in_sub,
+    input  wire [3:0] in_vol,
+
+    output reg  [1:0] trans,
+    output reg  [3:0] bright,
+    output reg  [3:0] contrast,
+    output reg  [1:0] scale,
+    output reg        sub,
+    output reg  [3:0] vol,
+
+    output reg  [3:0] ver              // 参数版本号，调试用
+);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            trans    <= 2'd0;
+            bright   <= 4'd10;
+            contrast <= 4'd10;
+            scale    <= 2'd0;
+            sub      <= 1'b1;
+            vol      <= 4'd6;
+            ver      <= 4'd0;
+        end else if (commit) begin
+            trans    <= in_trans;
+            bright   <= in_bright;
+            contrast <= in_contrast;
+            scale    <= in_scale;
+            sub      <= in_sub;
+            vol      <= in_vol;
+            ver      <= ver + 4'd1;
+        end
+    end
+
+endmodule

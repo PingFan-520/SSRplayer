@@ -1,0 +1,227 @@
+// ============================================================================
+//  top_osd_demo.v —— 双图 + 转场 + 参数 + 菜单 的整合演示顶层
+//
+//  像素通路：
+//     color_bar_hd  ─┐
+//                    ├─> transition ─> param_apply ─> 延时2拍 ─┐
+//     test_pattern_b ┘                                        ├─> alpha_blend ─> rgb_out
+//     osd_menu ───────────────────────────────────────────────┘
+//
+//  菜单开合只影响叠加层，视频通路每拍照常输出。
+// ============================================================================
+`timescale 1ns / 1ps
+
+module top_osd_demo #(
+    parameter integer HACTIVE = 1280,
+    parameter integer HTOTAL  = 1650,
+    parameter integer HSA     = 40,
+    parameter integer HBP     = 220,
+    parameter integer HFP     = 110,
+    parameter integer VACTIVE = 720,
+    parameter integer VTOTAL  = 750,
+    parameter integer VSA     = 5,
+    parameter integer VBP     = 20,
+    parameter integer VFP     = 5,
+    parameter integer PX0     = 360,
+    parameter integer PY0     = 110,
+    parameter integer PW      = 560,
+    parameter integer PH      = 500,
+    parameter integer HOLD_FRAMES = 150,        // 每张停留帧数
+    parameter integer KEY_CLK_HZ  = 75_000_000  // 仅仿真时调小以加速
+)(
+    input  wire        clk,          // 像素时钟 75MHz
+    input  wire        rst_n,
+    input  wire [3:0]  key,          // {OK, DOWN, UP, MENU}，低有效
+
+    output wire [23:0] rgb_out,
+    output wire        hs_out,
+    output wire        vs_out,
+    output wire        de_out,
+    output wire [11:0] x_out,
+    output wire [11:0] y_out,
+
+    output wire        menu_open,
+    output wire [2:0]  dbg_item,
+    output wire [3:0]  dbg_val,
+    output wire [7:0]  dbg_prog,
+    output wire [1:0]  dbg_effect,
+
+    output wire [5:0]  seg_sel,
+    output wire [7:0]  seg_data
+);
+
+    wire rst = ~rst_n;
+
+    // 行/场计数器含消隐，换算成"活动区坐标"再送菜单与输出
+    localparam integer HSTART = HSA + HBP;
+    localparam integer VSTART = VSA + VBP;
+
+    wire [11:0] act_x;
+    wire [11:0] act_y;
+
+    // ------------------------------------------------------------------
+    // 两路测试图（同一套时序）
+    // ------------------------------------------------------------------
+    wire [7:0]  a_r, a_g, a_b;
+    wire        bg_hs, bg_vs, bg_de;
+    wire [11:0] bg_x, bg_y;
+
+    color_bar_hd #(
+        .HACTIVE(HACTIVE), .HTOTAL(HTOTAL), .HSA(HSA), .HBP(HBP), .HFP(HFP),
+        .VACTIVE(VACTIVE), .VTOTAL(VTOTAL), .VSA(VSA), .VBP(VBP), .VFP(VFP)
+    ) u_bar (
+        .clk(clk), .rst(rst),
+        .hs(bg_hs), .vs(bg_vs), .de(bg_de),
+        .rgb_r(a_r), .rgb_g(a_g), .rgb_b(a_b),
+        .o_hcnt(bg_x), .o_vcnt(bg_y)
+    );
+
+    assign act_x = bg_x - HSTART[11:0];
+    assign act_y = bg_y - VSTART[11:0];
+
+    wire [23:0] b_rgb;
+    test_pattern_b #(.HACTIVE(HACTIVE), .VACTIVE(VACTIVE)) u_pat_b (
+        .clk(clk), .rst(rst), .x(bg_x), .y(bg_y), .rgb(b_rgb)
+    );
+
+    // ------------------------------------------------------------------
+    // 菜单
+    // ------------------------------------------------------------------
+    wire [3:0] k_press, k_rep;
+    key_ctrl #(.CLK_HZ(KEY_CLK_HZ)) u_key (
+        .clk(clk), .rst(rst), .key_in(key),
+        .press(k_press), .rep(k_rep)
+    );
+
+    wire        osd_on;
+    wire [23:0] osd_rgb;
+    wire [3:0]  osd_alpha;
+    wire [1:0]  cfg_trans;
+    wire [3:0]  cfg_bright, cfg_contrast, cfg_vol;
+    wire [1:0]  cfg_scale;
+    wire        cfg_sub, cfg_commit;
+
+    osd_menu #(
+        .HACTIVE(HACTIVE), .VACTIVE(VACTIVE),
+        .PX0(PX0), .PY0(PY0), .PW(PW), .PH(PH)
+    ) u_menu (
+        .clk(clk), .rst(rst),
+        .x(act_x), .y(act_y), .de(bg_de),
+        .key_menu(k_press[0]),
+        .key_up  (k_press[1] | k_rep[1]),
+        .key_down(k_press[2] | k_rep[2]),
+        .key_ok  (k_press[3] | k_rep[3]),
+        .osd_on(osd_on), .osd_rgb(osd_rgb), .osd_alpha(osd_alpha),
+        .menu_open(menu_open),
+        .dbg_item(dbg_item), .dbg_val(dbg_val),
+        .cfg_commit(cfg_commit),
+        .cfg_trans(cfg_trans), .cfg_bright(cfg_bright), .cfg_contrast(cfg_contrast),
+        .cfg_scale(cfg_scale), .cfg_sub(cfg_sub), .cfg_vol(cfg_vol)
+    );
+
+    // ------------------------------------------------------------------
+    // 参数影子寄存器：按键随时可改，帧首才生效
+    // ------------------------------------------------------------------
+    wire [1:0] ef_trans;
+    wire [3:0] ef_bright, ef_contrast, ef_vol;
+    wire [1:0] ef_scale;
+    wire       ef_sub;
+    wire [3:0] cfg_ver;
+
+    cfg_latch u_cfg (
+        .clk(clk), .rst(rst), .commit(cfg_commit),
+        .in_trans(cfg_trans), .in_bright(cfg_bright), .in_contrast(cfg_contrast),
+        .in_scale(cfg_scale), .in_sub(cfg_sub), .in_vol(cfg_vol),
+        .trans(ef_trans), .bright(ef_bright), .contrast(ef_contrast),
+        .scale(ef_scale), .sub(ef_sub), .vol(ef_vol),
+        .ver(cfg_ver)
+    );
+
+    // ------------------------------------------------------------------
+    // 转场
+    // ------------------------------------------------------------------
+    wire        frame_tick = (act_x == 12'd0) && (act_y == 12'd0);
+    wire [7:0]  trans_prog;
+    wire        trans_swap;
+
+    auto_transition #(.HOLD_FRAMES(HOLD_FRAMES), .RUN_FRAMES(32)) u_auto (
+        .clk(clk), .rst(rst),
+        .frame_tick(frame_tick),
+        .trig(1'b0),
+        .effect(ef_trans),
+        .prog(trans_prog),
+        .swap(trans_swap)
+    );
+
+    wire [23:0] src_a = trans_swap ? b_rgb : {a_r, a_g, a_b};
+    wire [23:0] src_b = trans_swap ? {a_r, a_g, a_b} : b_rgb;
+
+    wire [23:0] trans_rgb;
+    transition #(.HACTIVE(HACTIVE)) u_trans (
+        .rgb_a(src_a), .rgb_b(src_b),
+        .x(act_x), .effect(ef_trans), .prog(trans_prog),
+        .rgb_out(trans_rgb)
+    );
+
+    // ------------------------------------------------------------------
+    // 亮度 / 对比度
+    // ------------------------------------------------------------------
+    wire [23:0] adj_rgb;
+    param_apply u_param (
+        .rgb_in(trans_rgb),
+        .bright(ef_bright), .contrast(ef_contrast),
+        .rgb_out(adj_rgb)
+    );
+
+    // ------------------------------------------------------------------
+    // 打 2 拍，与菜单输出对齐
+    // ------------------------------------------------------------------
+    reg [23:0] vd1, vd2;
+    reg        hsd1, hsd2, vsd1, vsd2, ded1, ded2;
+    reg [11:0] xd1, xd2, yd1, yd2;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            vd1 <= 24'd0; vd2 <= 24'd0;
+            hsd1 <= 1'b0; hsd2 <= 1'b0;
+            vsd1 <= 1'b0; vsd2 <= 1'b0;
+            ded1 <= 1'b0; ded2 <= 1'b0;
+            xd1 <= 12'd0; xd2 <= 12'd0;
+            yd1 <= 12'd0; yd2 <= 12'd0;
+        end else begin
+            vd1 <= adj_rgb;   vd2 <= vd1;
+            hsd1 <= bg_hs;    hsd2 <= hsd1;
+            vsd1 <= bg_vs;    vsd2 <= vsd1;
+            ded1 <= bg_de;    ded2 <= ded1;
+            xd1 <= act_x;     xd2 <= xd1;
+            yd1 <= act_y;     yd2 <= yd1;
+        end
+    end
+
+    alpha_blend u_blend (
+        .vid_rgb (vd2),
+        .osd_rgb (osd_rgb),
+        .alpha   (osd_alpha),
+        .out_rgb (rgb_out)
+    );
+
+    assign hs_out = hsd2;
+    assign vs_out = vsd2;
+    assign de_out = ded2;
+    assign x_out  = xd2;
+    assign y_out  = yd2;
+
+    assign dbg_prog   = trans_prog;
+    assign dbg_effect = ef_trans;
+
+    // ------------------------------------------------------------------
+    seg7 #(.CLK_HZ(75_000_000)) u_seg (
+        .clk     (clk),
+        .rst_n   (rst_n),
+        .value   ({13'd0, dbg_item, cfg_ver, dbg_val}),
+        .dp_mask ({menu_open, 5'b00000}),
+        .seg_sel (seg_sel),
+        .seg_data(seg_data)
+    );
+
+endmodule

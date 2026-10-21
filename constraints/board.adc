@@ -1,0 +1,41 @@
+# ============================================================================
+#  board.adc —— 上板工程引脚约束（康芯 HX4S20 / EG4S20BG256）
+#  引脚取自参考工程 pin.adc 与 HX4S20 手册，勿随意改动
+# ============================================================================
+
+# 50MHz 板载晶振
+set_pin_assignment { clk_50m } { LOCATION = R7; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+
+# 4 个独立按键，按下为低
+set_pin_assignment { key1 } { LOCATION = A2; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }   # KEY1 MENU
+set_pin_assignment { key3 } { LOCATION = B1; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }   # KEY3 UP
+set_pin_assignment { key4 } { LOCATION = B2; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }   # KEY4 DOWN
+set_pin_assignment { key2 } { LOCATION = C1; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }   # KEY2 OK
+
+# HDMI 差分输出（只约束 P 端，N 端由 TD 自动配对）
+set_pin_assignment { HDMI_CLK_P } { LOCATION = C3; IOSTANDARD = LVDS33; PULLTYPE = NONE; }
+set_pin_assignment { HDMI_D0_P }  { LOCATION = G5; IOSTANDARD = LVDS33; PULLTYPE = NONE; }
+set_pin_assignment { HDMI_D1_P }  { LOCATION = F1; IOSTANDARD = LVDS33; PULLTYPE = NONE; }
+set_pin_assignment { HDMI_D2_P }  { LOCATION = E1; IOSTANDARD = LVDS33; PULLTYPE = NONE; }
+
+# HDMI DDC（EDID）
+set_pin_assignment { HDMI_DDC_SCL } { LOCATION = P2; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = PULLUP; }
+set_pin_assignment { HDMI_DDC_SDA } { LOCATION = R2; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = PULLUP; }
+
+# 数码管段码
+set_pin_assignment { seg_data[0] } { LOCATION = C15; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[1] } { LOCATION = C16; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[2] } { LOCATION = B6;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[3] } { LOCATION = A5;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[4] } { LOCATION = B5;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[5] } { LOCATION = A8;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[6] } { LOCATION = A7;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_data[7] } { LOCATION = A6;  IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+
+# 数码管位选
+set_pin_assignment { seg_sel[0] } { LOCATION = E12; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_sel[1] } { LOCATION = E10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_sel[2] } { LOCATION = C13; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_sel[3] } { LOCATION = F10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_sel[4] } { LOCATION = E11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment { seg_sel[5] } { LOCATION = D11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
