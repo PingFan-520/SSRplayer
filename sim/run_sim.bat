@@ -23,6 +23,7 @@ if exist work rmdir /s /q work
   ..\rtl\video\color_bar_hd.v ^
   ..\rtl\video\rgb2axis.v ^
   ..\rtl\video\test_pattern_b.v ^
+  ..\rtl\video\bmp_decode.v ^
   ..\rtl\ui\font_rom.v ^
   ..\rtl\ui\key_ctrl.v ^
   ..\rtl\ui\osd_menu.v ^
@@ -32,6 +33,8 @@ if exist work rmdir /s /q work
   ..\rtl\ui\cfg_latch.v ^
   ..\rtl\top_osd_demo.v ^
   tb_probe.v ^
+  tb_bmp_decode.v ^
+  tb_bmp_display.v ^
   tb_video_hd.v ^
   tb_osd_demo.v
 

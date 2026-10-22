@@ -14,7 +14,8 @@ prj/log/
 
 # ---- 仿真中间产物 ----
 sim/*.ppm
-sim/work/
+sim/*.bmp
+sim/work*/
 sim/lint/
 sim/transcript
 

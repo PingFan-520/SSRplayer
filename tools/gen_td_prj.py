@@ -23,6 +23,7 @@ SOURCES = [
     "rtl/video/color_bar_hd.v",
     "rtl/video/test_pattern_b.v",
     "rtl/video/rgb2axis.v",
+    "rtl/video/bmp_decode.v",
     "rtl/ui/font_rom.v",
     "rtl/ui/key_ctrl.v",
     "rtl/ui/alpha_blend.v",
