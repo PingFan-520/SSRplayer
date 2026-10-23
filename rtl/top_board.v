@@ -244,20 +244,26 @@ module top_board #(
         .run(pat_run), .done(pat_done)
     );
 
-    // 加载结束后等写 FIFO 排空，再切到"边读边显示"
+    // 加载结束后等写 FIFO / SDRAM burst 收尾，再切到"边读边显示"。
+    // 注意：这里不能用层次引用（如 u_fb.wf_empty）——TD 综合器报
+    //   "external connection to net ... is not allowed"。
+    // 而且 wf_empty 属于 mem 时钟域，拿到 pix 域用也不安全。
+    // 改用 wr_ready（pix 域，= ~wf_full）：只要它连续 4000 拍（≈107us）不拉低，
+    // 就说明 128 深的写 FIFO 已经排空、SDRAM 最后一组 burst 也发完了。
     reg        pat_done_d;
-    reg [11:0] ld_dly;
+    reg [12:0] ld_dly;
 
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
             pat_done_d <= 1'b0;
-            ld_dly     <= 12'd0;
+            ld_dly     <= 13'd0;
             load_mode  <= 1'b1;
         end else begin
             pat_done_d <= pat_done;
-            if (load_mode && pat_done_d && u_fb.wf_empty) begin
-                if (ld_dly == 12'd2000) load_mode <= 1'b0;
-                else                    ld_dly    <= ld_dly + 12'd1;
+            if (load_mode && pat_done_d) begin
+                if (!fb_rdy)                  ld_dly <= 13'd0;   // FIFO 又满了，重新等
+                else if (ld_dly == 13'd4000)  load_mode <= 1'b0;
+                else                          ld_dly <= ld_dly + 13'd1;
             end
         end
     end
