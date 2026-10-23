@@ -88,7 +88,7 @@ sdr_as_ram  #( .self_refresh_open(1'b1))
 
 assign SDR_CKE=1'b1;
 
-//`ifndef SIMULATION
+`ifndef SIMULATION
 	EG_PHY_SDRAM_2M_32 sdram(
 		.clk(SDRAM_CLK),
 		.ras_n(SDR_RAS),
@@ -104,6 +104,6 @@ assign SDR_CKE=1'b1;
 		.dm3(SDR_DM[3]),
 		.cke(1'b1)
 		);
-//`endif
+`endif
 
 endmodule 

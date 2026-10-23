@@ -21,6 +21,7 @@ sim/transcript
 
 # ---- 厂商参考工程与手册（体积大，不入库）----
 全国大学生嵌入式芯片与系统设计竞赛*/
+APUG011_high_performance_sdram_read_write_reference_design*/
 *.pdf
 
 # ---- 本地工作数据 ----
