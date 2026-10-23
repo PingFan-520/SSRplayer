@@ -21,7 +21,8 @@ module afifo #(
     input  wire          rd_en,
     output wire [DW-1:0] rd_data,
     output wire          rd_empty,
-    output wire          rd_valid      // rd_en 真正被接受（rd_data 本拍有效）
+    output wire          rd_valid,     // rd_en 真正被接受（rd_data 本拍有效）
+    output wire [AW:0]   wr_used       // 写侧看到的"已用字数"（读指针已同步到写域）
 );
 
     localparam integer PW = AW + 1;
@@ -48,6 +49,23 @@ module afifo #(
     // 关键：必须用 "rd_en & ~rd_empty"，而不是 rd_en —— rd_empty 是跨时钟同步的，
     // FIFO 接近空时它会滞后，若只看 rd_en 会把同一个字重复取两次。
     assign rd_valid = rd_valid_r;
+
+    // 写侧视角的实时占用：写指针 - 同步过来的读指针。
+    // 比在外层用"消费脉冲累加"估算可靠得多 —— 后者只要跨域同步边界
+    // 多一拍少一拍，误差就会永久累积（实测漂到 2049 > 深度 2048）。
+    function [PW-1:0] gray2bin;
+        input [PW-1:0] g;
+        integer i;
+        begin
+            gray2bin[PW-1] = g[PW-1];
+            for (i = PW-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray2bin[i+1] ^ g[i];
+        end
+    endfunction
+
+    wire [PW-1:0] rbin_w2 = gray2bin(rgray_w2);
+    // 同步滞后 2 个读时钟 -> wr_used 略微"偏大"，属于安全方向（宁可早停不溢出）
+    assign wr_used = wbin - rbin_w2;
 
     always @(posedge clk_w or posedge aclr) begin
         if (aclr) begin

@@ -222,10 +222,15 @@ module frame_buffer #(
                 if (bi == 2'd3) begin
                     bsend <= 1'b0;
                     bi    <= 2'd0;
-                    bgap  <= 4'd0;          // 紧接下一个 burst（有 gap 反而只写首字）
+                    // burst 之间必须留 1 拍 NOP：
+                    // tb_sdram_readscan 实测，背靠背（gap=0）时控制器只落首字/丢整组，
+                    // 留 1 拍后行内 63/64 个 burst 全部正确。
+                    bgap  <= 4'd1;
                 end else begin
                     bi <= bi + 2'd1;
                 end
+            end else if (bgap != 4'd0) begin
+                bgap <= bgap - 4'd1;
             end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy) begin
                 bsend <= 1'b1;
                 bi    <= 2'd0;
@@ -258,13 +263,16 @@ module frame_buffer #(
     wire        rf_full, rf_empty, rf_rd;
     reg         rf_wr;
     reg  [31:0] rd_cap;
-    reg  [10:0] occ;
+    reg  [11:0] occ;
     wire [31:0] rf_dout;
 
-    afifo #(.DW(32), .AW(10)) u_rfifo (
+    // 2026-10-24：深度 1024 -> 2048 字，并改用 FIFO 自己的 wr_used 做限流。
+    wire [12:0] rf_used;
+    afifo #(.DW(32), .AW(12)) u_rfifo (
         .clk_w(clk_mem), .clk_r(pix_clk), .aclr(wr_win_m | pix_rst),
         .wr_en(rf_wr), .wr_data(rd_cap), .wr_full(rf_full),
-        .rd_en(rf_rd), .rd_data(rf_dout), .rd_empty(rf_empty)
+        .rd_en(rf_rd), .rd_data(rf_dout), .rd_empty(rf_empty),
+        .rd_valid(), .wr_used(rf_used)
     );
 
     reg [19:0] rd_cnt;
@@ -272,12 +280,34 @@ module frame_buffer #(
     // 读也必须**连续 4 拍**构成一次 burst（与写同理）：
     // 若被 occ/busy 打断成 1~3 拍，控制器会返回错位数据，
     // 表现为"每 16 字有 3 个字内容偏"，图像上就是每 32 像素错 6 个。
+    //
+    // 2026-10-24 实测否掉了"加长到 16 字"的想法：
+    //   burst_cycles=1288170 / busy_in_burst=1030536 -> 控制器在连续读的第 5 拍起
+    //   就拉高 Sdr_busy，busy 期间的读命令被丢弃，图像只剩 1.4% 正确。
+    //   所以这里必须严格 4 拍一组，且每组的起点要等 busy 落下。
     reg  [1:0] rbi;
     reg        rburst;
     reg  [3:0] rgap;             // 跨 SDRAM 行时的间隔（PRE + ACT）
 
+    // ==================================================================
+    // FIFO 占用限流（clk_mem 域）
+    //
+    //   直接取 afifo 的 wr_used，不再用"消费脉冲累加"估算。
+    //   历史教训：用 rf_rd 打两拍做减计数时，跨域同步边界会把单拍脉冲
+    //   展宽或漏拍，误差永久漂移（实测 fcnt 漂到 2049 > 深度 2048），
+    //   于是读侧长期停在"以为满了"的状态，FIFO 却是空的 —— 图像只剩 1.4%。
+    // ==================================================================
+    // TB 仍按旧名字观测
+    wire [12:0] fcnt = rf_used;
+
+
+    // 只靠 FIFO 的 full 做保护：实测加任何额外水位限流都会让读"读4字就停"，
+    // 反而降低有效带宽（fcnt 阈值 512/900 时读只有 125K 字/帧）。
+    // 说明：曾试过"FIFO 占用 + 在途"联合限流，但 rstart 依赖 used、
+    // used 依赖 outst、outst 又依赖 rd_go/rstart，形成组合环，不能这么写。
+    // fcnt 现在是准的（单拍计数），阈值留 16 字余量给 burst 在途数据。
     wire       rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                        (occ < 11'd128) & ~rf_full & ~rburst & (rgap == 4'd0);
+                        (rf_used < 13'd4080) & ~rf_full & ~rburst & (rgap == 4'd0);
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin
@@ -285,14 +315,14 @@ module frame_buffer #(
             rbi    <= 2'd0;
             rgap   <= 4'd0;
         end else if (rburst) begin
-            if (rbi == 2'd2) begin
-                rburst <= 1'b0;          // 本拍是第 4 个，共 4 拍
+            if (rbi == 2'd2) begin      // rstart 发第 1 拍，rbi 0..2 再发 3 拍 = 共 4 字
+                rburst <= 1'b0;
                 rbi    <= 2'd0;
-                // 本次 burst 读到了 SDRAM 行的最后一个字（256 字一行），
-                // 下一个地址要换行，必须留出 PRE+ACT 的时间，
-                // 否则控制器返回的数据会错位（实测跨行读只有 32% 正确）。
-                if (rd_cnt[7:0] == 8'd255)
-                    rgap <= 4'd12;
+                // 每个读 burst 之后都要留 NOP：
+                // tb_sdram_readscan 实测，背靠背读（gap=0）会错 19%，
+                // 4 拍 burst + 间隔后完全正确。
+                // 统一 1 拍间隔。
+                rgap <= 4'd1;
             end else begin
                 rbi <= rbi + 2'd1;
             end
@@ -317,7 +347,7 @@ module frame_buffer #(
             occ    <= 11'd0;
             rd_cnt <= 20'd0;
         end else begin
-            rf_wr <= app_rd_valid & ~wr_win_m;
+            rf_wr <= app_rd_valid & ~wr_win_m & ~rf_full;
             if (app_rd_valid)
                 rd_cap <= app_rd_dout;
 

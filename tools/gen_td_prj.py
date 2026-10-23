@@ -20,10 +20,18 @@ PRJ_NAME = "yuanshen_hdmi"
 # 编译顺序：底层/工具模块 -> 视频 -> UI -> 顶层
 SOURCES = [
     "rtl/common/seg7.v",
+    "rtl/mem/global_def.v",
+    "rtl/mem/sdr_as_ram.enc.v",
+    "rtl/mem/sdr_init_ref.enc.v",
+    "rtl/mem/sdr_wrrd.enc.v",
+    "rtl/mem/sdram.v",
+    "rtl/mem/afifo.v",
+    "rtl/mem/frame_buffer.v",
     "rtl/video/color_bar_hd.v",
     "rtl/video/test_pattern_b.v",
     "rtl/video/rgb2axis.v",
     "rtl/video/bmp_decode.v",
+    "rtl/video/pattern_src.v",
     "rtl/ui/font_rom.v",
     "rtl/ui/key_ctrl.v",
     "rtl/ui/alpha_blend.v",

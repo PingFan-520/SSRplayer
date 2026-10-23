@@ -2,9 +2,18 @@
 //  top_board.v —— 上板顶层（康芯 HX4S20 / EG4S20BG256）
 //
 //  链路：
-//    50MHz -> PLL(75 / 375MHz)
+//    50MHz -> PLL(37.5 / 187.5MHz)
 //          -> color_bar + pattern_b + transition + param + menu（top_osd_demo）
 //          -> rgb2axis -> HDMI 1.4b core -> phy -> HDMI 接口
+//
+//  为什么是 37.5MHz（720p30 / CEA VIC 4）：
+//    SDRAM 控制器实测读带宽只有 7.51M 字/s，而 720p60 下显示 640x480 图片
+//    行内瞬时需求是 640px/22.2us = 14.4M 字/s —— 差一半，FIFO 6 行就耗空，
+//    图像每 32 像素错 6 个（81% 正确率）。把像素时钟减半后行时间变成 44.4us，
+//    需求降到 7.2M，再配合 frame_buffer 的 16 字长 burst，才真正有余量。
+//    H/V 时序参数一个字都没改（仍是 1650x750），只是时钟减半 -> 30Hz。
+//    如果显示器不认 30Hz：把 CLKC0_DIV 改回 10、CLKC1_DIV 改回 2、
+//    VIDEO_VIC 改回 16 即回到 720p60（带宽不足，图片会错位但能出图）。
 //
 //  按键（均为低有效，板上 KEY1~KEY4）：
 //    KEY1(A2) = MENU 开合        KEY3(B1) = UP
@@ -45,9 +54,13 @@ module top_board #(
 );
 
     // ------------------------------------------------------------------
-    // PLL：50MHz -> 75MHz 像素 / 375MHz 串行（已在 ModelSim 实测 75.000/375.0）
+    // PLL：50MHz -> 37.5MHz 像素 / 187.5MHz 串行 / 125MHz+125MHz(移相) SDRAM
+    //   VCO = 50 x 15 = 750MHz
+    //   CLKC0 = 750/20 = 37.5MHz      CLKC1 = 750/4  = 187.5MHz
+    //   CLKC2 = 750/6  = 125MHz       CLKC3 = 750/6  = 125MHz（CPHASE 差 3
+    //   个 VCO = 4ns = 半个周期，对应参考工程的 Clk_sft）
     // ------------------------------------------------------------------
-    wire clk_pix, clk_ser, pll_lock;
+    wire clk_pix, clk_ser, clk_mem, clk_mem_sft, pll_lock;
 
     EG_PHY_PLL #(
         .DPHASE_SOURCE  ("DISABLE"),
@@ -66,13 +79,21 @@ module top_board #(
         .REFCLK_DIV     (1),
         .FBCLK_DIV      (15),
         .CLKC0_ENABLE   ("ENABLE"),
-        .CLKC0_DIV      (10),
-        .CLKC0_CPHASE   (9),
+        .CLKC0_DIV      (20),
+        .CLKC0_CPHASE   (19),
         .CLKC0_FPHASE   (0),
         .CLKC1_ENABLE   ("ENABLE"),
-        .CLKC1_DIV      (2),
-        .CLKC1_CPHASE   (1),
-        .CLKC1_FPHASE   (0)
+        .CLKC1_DIV      (4),
+        .CLKC1_CPHASE   (3),
+        .CLKC1_FPHASE   (0),
+        .CLKC2_ENABLE   ("ENABLE"),
+        .CLKC2_DIV      (6),
+        .CLKC2_CPHASE   (5),
+        .CLKC2_FPHASE   (0),
+        .CLKC3_ENABLE   ("ENABLE"),
+        .CLKC3_DIV      (6),
+        .CLKC3_CPHASE   (2),
+        .CLKC3_FPHASE   (0)
     ) u_pll (
         .refclk     (clk_50m),
         .reset      (1'b0),
@@ -91,7 +112,7 @@ module top_board #(
         .daddr      (6'h00),
         .do         (),
         .fbclk      (1'b0),
-        .clkc       ({open, open, open, clk_ser, clk_pix})
+        .clkc       ({open, clk_mem_sft, clk_mem, clk_ser, clk_pix})
     );
 
     // ------------------------------------------------------------------
@@ -113,11 +134,137 @@ module top_board #(
     end
 
     // ------------------------------------------------------------------
-    // 画面 + 菜单
+    // 统一声明（跨模块互连，避免使用前未声明）
     // ------------------------------------------------------------------
     wire [23:0] rgb;
     wire        hs, vs, de;
     wire [11:0] x, y;
+
+    wire        raw_de;
+    wire [11:0] raw_x, raw_y;
+
+    wire        pat_en, pat_run;
+    wire [11:0] pat_x, pat_y;
+    wire [15:0] pat_rgb;
+    wire        pat_done;
+
+    // ------------------------------------------------------------------
+    // SDRAM（封装内 SIP，厂商控制器）
+    // ------------------------------------------------------------------
+    wire        sdr_init_done, sdr_ref_vld, sdr_busy, sdr_rd_valid;
+    wire [31:0] sdr_rd_dout;
+
+    wire [20:0] fb_wr_addr, fb_rd_addr;
+    wire [31:0] fb_wr_din;
+    wire        fb_wr_en, fb_rd_en;
+
+    sdram u_sdram (
+        .Clk              (clk_mem),
+        .Clk_sft          (clk_mem_sft),
+        .Rst              (~rst_n),
+
+        .Sdr_init_done    (sdr_init_done),
+        .Sdr_init_ref_vld (sdr_ref_vld),
+        .Sdr_busy         (sdr_busy),
+
+        .App_wr_en        (fb_wr_en),
+        .App_wr_addr      (fb_wr_addr),
+        .App_wr_dm        (4'h0),
+        .App_wr_din       (fb_wr_din),
+
+        .App_rd_en        (fb_rd_en),
+        .App_rd_addr      (fb_rd_addr),
+        .Sdr_rd_en        (sdr_rd_valid),
+        .Sdr_rd_dout      (sdr_rd_dout)
+    );
+
+    // ------------------------------------------------------------------
+    // 帧缓存：只存 640x480 的图片区，黑边不进 SDRAM
+    // ------------------------------------------------------------------
+    wire [15:0] fb_rgb;
+    wire        fb_de, fb_rdy;
+
+    reg         load_mode;
+
+    frame_buffer #(
+        .FB_W(1280), .FB_H(720), .VACTIVE(720),
+        .WR_LINES(25), .V_OFFSET(25),
+        .IMG_W(640), .IMG_H(480), .IMG_X0(320), .IMG_Y0(120)
+    ) u_fb (
+        .app_wr_addr  (fb_wr_addr),
+        .app_wr_din   (fb_wr_din),
+        .app_wr_en    (fb_wr_en),
+        .app_rd_addr  (fb_rd_addr),
+        .app_rd_en    (fb_rd_en),
+        .app_rd_valid (sdr_rd_valid),
+        .app_rd_dout  (sdr_rd_dout),
+        .app_init_done(sdr_init_done),
+        .app_ref_vld  (sdr_ref_vld),
+        .app_busy     (sdr_busy),
+
+        .clk_mem (clk_mem),
+        .rst_mem (~rst_n),
+
+        .pix_clk (clk_pix),
+        .pix_rst (~rst_n),
+        .wr_en   (pat_en),
+        .wr_x    (pat_x),
+        .wr_y    (pat_y),
+        .wr_rgb  (pat_rgb),
+        .wr_buf  (1'b0),
+        .wr_ready(fb_rdy),
+
+        .vs      (vs),
+        .de      (raw_de),
+        .x       (raw_x),
+        .y       (raw_y),
+        .rd_buf  (1'b0),
+        .load_mode(load_mode),
+        .rgb_out (fb_rgb),
+        .de_out  (fb_de)
+    );
+
+    // ------------------------------------------------------------------
+    // 图案源：上电写一帧 640x480 彩条网格进 SDRAM
+    //   （接上 SD 卡后这一段会换成 bmp_decode 的输出）
+    // ------------------------------------------------------------------
+    reg [3:0] st_cnt;
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) st_cnt <= 4'd0;
+        else if (st_cnt != 4'hF) st_cnt <= st_cnt + 4'd1;
+    end
+    wire pat_start = (st_cnt == 4'hE);
+
+    pattern_src #(
+        .IMG_W(640), .IMG_H(480), .X0(320), .Y0(120)
+    ) u_pat (
+        .clk(clk_pix), .rst(~rst_n),
+        .start(pat_start), .ready(fb_rdy),
+        .en(pat_en), .x(pat_x), .y(pat_y), .rgb(pat_rgb),
+        .run(pat_run), .done(pat_done)
+    );
+
+    // 加载结束后等写 FIFO 排空，再切到"边读边显示"
+    reg        pat_done_d;
+    reg [11:0] ld_dly;
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin
+            pat_done_d <= 1'b0;
+            ld_dly     <= 12'd0;
+            load_mode  <= 1'b1;
+        end else begin
+            pat_done_d <= pat_done;
+            if (load_mode && pat_done_d && u_fb.wf_empty) begin
+                if (ld_dly == 12'd2000) load_mode <= 1'b0;
+                else                    ld_dly    <= ld_dly + 12'd1;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // 画面 + 菜单
+    // ------------------------------------------------------------------
     wire        menu_open;
     wire [2:0]  dbg_item;
     wire [3:0]  dbg_val;
@@ -128,8 +275,9 @@ module top_board #(
         .HACTIVE(HACTIVE), .HTOTAL(HTOTAL), .HSA(HSA), .HBP(HBP), .HFP(HFP),
         .VACTIVE(VACTIVE), .VTOTAL(VTOTAL), .VSA(VSA), .VBP(VBP), .VFP(VFP),
         .PX0(360), .PY0(110), .PW(560), .PH(500),
-        .HOLD_FRAMES(150),
-        .KEY_CLK_HZ(75_000_000)
+        .HOLD_FRAMES(75),                 // 30fps 下 2.5s 换一张
+        .KEY_CLK_HZ(37_500_000),
+        .USE_EXT(1)
     ) u_core (
         .clk(clk_pix), .rst_n(rst_n),
         .key({key2, key4, key3, key1}),      // {OK, DOWN, UP, MENU}
@@ -137,7 +285,9 @@ module top_board #(
         .x_out(x), .y_out(y),
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),
         .dbg_prog(dbg_prog), .dbg_effect(dbg_effect),
-        .seg_sel(seg_sel), .seg_data(seg_data)
+        .seg_sel(seg_sel), .seg_data(seg_data),
+        .ext_rgb(fb_rgb),
+        .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y)
     );
 
     // ------------------------------------------------------------------
@@ -172,7 +322,7 @@ module top_board #(
     end
 
     // ------------------------------------------------------------------
-    // HDMI 1.4b 发送核（720p60, VIC 16）
+    // HDMI 1.4b 发送核（720p30, VIC 4；H/V 时序仍是 1650x750）
     // ------------------------------------------------------------------
     wire [9:0] tmds_ch0, tmds_ch1, tmds_ch2, tmds_clk;
 
@@ -188,7 +338,7 @@ module top_board #(
         .VFP               (VFP),
         .VBP               (VBP),
         .VACTIVE           (VACTIVE),
-        .VIDEO_VIC         (16),
+        .VIDEO_VIC         (4),
         .VIDEO_TPG         ("Disable"),
         .VIDEO_FORMAT      ("RGB"),
         .AUDIO_SAMPLE_RATE ("48K"),

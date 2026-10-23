@@ -29,3 +29,11 @@ APUG011_high_performance_sdram_read_write_reference_design*/
 
 # ---- Office 临时文件 ----
 ~$*
+
+sim/lint_work/
+sim/*.bak
+
+# ---- 参考例程与手册（体积大，仅本地）----
+设计参考文档/
+芯片手册/
+图片资源/

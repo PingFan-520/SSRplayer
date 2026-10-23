@@ -17,7 +17,7 @@ module tb_frame_sdram;
 
     // ---------------- 时钟 ----------------
     reg pix_clk = 1'b0;
-    always #6.6667 pix_clk = ~pix_clk;      // 75MHz  像素域
+    always #13.3333 pix_clk = ~pix_clk;     // 37.5MHz 像素域（720p30）
 
     reg mem_clk = 1'b0;
     always #4.0 mem_clk = ~mem_clk;         // 125MHz SDRAM 域
@@ -223,6 +223,120 @@ module tb_frame_sdram;
         end
     end
 
+    // ---------------- vcnt 分布统计 ----------------
+    integer v_cyc = 0, v_lt25 = 0, vmax = 0, vmin = 4095;
+    always @(posedge pix_clk) begin
+        v_cyc = v_cyc + 1;
+        if (vcnt < 12'd25) v_lt25 = v_lt25 + 1;
+        if (vcnt > vmax) vmax = vcnt;
+        if (vcnt < vmin) vmin = vcnt;
+    end
+
+    // ---------------- 读地址序列 ----------------
+    integer adr_n = 0;
+    always @(posedge mem_clk)
+        if (u_fb.app_rd_en && adr_n < 40) begin
+            $display("[adr] addr=%0d cnt=%0d rb=%b gap=%0d", u_fb.app_rd_addr, u_fb.rd_cnt, u_fb.rburst, u_fb.rgap);
+            adr_n = adr_n + 1;
+        end
+
+    // ---------------- rstart 触发时刻 ----------------
+    integer rt_n = 0;
+    always @(posedge mem_clk)
+        if (u_fb.rstart && rt_n < 24) begin
+            $display("[rt] t=%0t win=%b busy=%b init=%b fcnt=%0d rgap=%0d rb=%b",
+                     $time, u_fb.wr_win_m, u_fb.app_busy, u_fb.app_init_done,
+                     u_fb.fcnt, u_fb.rgap, u_fb.rburst);
+            rt_n = rt_n + 1;
+        end
+
+    // ---------------- rstart 各条件占空比 ----------------
+    integer a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0,a8=0,a9=0,ac=0;
+    integer b1=0,b2=0;
+    integer xf=0,xg=0,xb=0,xr=0,xrr=0,xwin=0;
+    integer c_bib = 0, c_burst = 0;
+    always @(posedge mem_clk) begin
+        ac = ac + 1;
+        if (!u_fb.wr_win_m)       a1 = a1 + 1;
+        if (u_fb.app_init_done)   a2 = a2 + 1;
+        if (!u_fb.app_ref_vld)    a3 = a3 + 1;
+        if (!u_fb.app_busy)       a4 = a4 + 1;
+        if (u_fb.fcnt < 11'd512)  a5 = a5 + 1;
+        if (!u_fb.rf_full)        a6 = a6 + 1;
+        if (!u_fb.rburst)         a7 = a7 + 1;
+        if (u_fb.rgap == 4'd0)    a8 = a8 + 1;
+        if (u_fb.rstart)          a9 = a9 + 1;
+        if (!u_fb.wr_win_m) b2 = b2 + 1;
+        if (!u_fb.wr_win_m && !u_fb.app_busy) b1 = b1 + 1;
+        if ((^u_fb.fcnt)   === 1'bx) xf  = xf + 1;
+        if ((^u_fb.rgap)   === 1'bx) xg  = xg + 1;
+        if ((^u_fb.rburst) === 1'bx) xb  = xb + 1;
+        if (u_fb.rstart     === 1'bx) xr  = xr + 1;
+        if (u_fb.rf_rd      === 1'bx) xrr = xrr + 1;
+        if (u_fb.wr_win_m   === 1'bx) xwin= xwin + 1;
+        if (u_fb.rburst) begin
+            c_burst = c_burst + 1;
+            if (u_fb.app_busy) c_bib = c_bib + 1;
+        end
+    end
+
+    // ---------------- 读侧带宽统计 ----------------
+    integer q_rden = 0, q_busy = 0, q_vld = 0, q_cyc = 0, q_fmax = 0, q_full = 0, q_win = 0, q_ref = 0;
+    integer d_cyc = 0, d_win = 0, d_rden = 0, d_busy = 0;
+    always @(posedge mem_clk) begin
+        q_cyc = q_cyc + 1;
+        if (u_fb.app_rd_en) q_rden = q_rden + 1;
+        if (u_fb.app_rd_valid) q_vld = q_vld + 1;
+        if (u_fb.app_busy) q_busy = q_busy + 1;
+        if (u_fb.rf_full) q_full = q_full + 1;
+        if (u_fb.wr_win_m) q_win = q_win + 1;
+        if (u_fb.app_ref_vld) q_ref = q_ref + 1;
+        if (!load_mode) begin
+            d_cyc = d_cyc + 1;
+            if (u_fb.wr_win_m) d_win = d_win + 1;
+            if (u_fb.app_rd_en) d_rden = d_rden + 1;
+            if (u_fb.app_busy) d_busy = d_busy + 1;
+        end
+        if (u_fb.fcnt > q_fmax) q_fmax = u_fb.fcnt;
+    end
+
+    // ---------------- FIFO 饥饿统计（显示要数据但 FIFO 空） ----------------
+    integer c_starve = 0;
+    integer frm = 0;
+    always @(posedge pix_clk) if (vs) frm <= frm + 1;
+    always @(posedge pix_clk)
+        if (frm >= 2 && u_fb.in_img && u_fb.xr[0] && u_fb.rf_empty) c_starve = c_starve + 1;
+
+    // ---------------- 读序列比对：FIFO 弹出顺序 vs SDRAM 内容 ----------------
+    integer seq_i = 0, seq_bad = 0, seq_n = 0;
+    reg     seq_rd_d = 1'b0;
+    always @(posedge pix_clk) begin
+        seq_rd_d <= u_fb.rf_rd;
+        if (u_fb.pix_rst || vs) begin
+            seq_i <= 0; seq_bad <= 0; seq_n <= 0;
+        end else if (seq_rd_d && frm >= 2) begin
+            if (u_fb.rf_dout !== u_chip.Bank0[seq_i]) begin
+                if (seq_bad < 8)
+                    $display("[seq] i=%0d got=%h exp=%h", seq_i, u_fb.rf_dout, u_chip.Bank0[seq_i]);
+                seq_bad <= seq_bad + 1;
+            end
+            seq_i <= seq_i + 1;
+            seq_n <= seq_n + 1;
+        end
+    end
+
+    // ---------------- 丢字统计 ----------------
+    integer c_drop = 0, c_rfwr = 0, c_rfrd = 0, c_rdm = 0, c_low = 0;
+    always @(posedge mem_clk) begin
+        if (u_fb.rf_used < 12'd64) c_low = c_low + 1;
+        if (u_fb.rf_used > c_rdm) c_rdm = u_fb.rf_used;   // 峰值占用
+    end
+    always @(posedge mem_clk) begin
+        if (u_fb.rf_wr) c_rfwr = c_rfwr + 1;
+        if (u_fb.app_rd_valid && u_fb.rf_full) c_drop = c_drop + 1;
+    end
+    always @(posedge pix_clk) if (u_fb.rf_rd) c_rfrd = c_rfrd + 1;
+
     // ---------------- 抓帧 ----------------
     reg [15:0] frame_buf [0:FW*FH-1];
     integer wp = 0;
@@ -236,6 +350,11 @@ module tb_frame_sdram;
     end
 
     integer fh, wxx, wyy, i, j, k, found = 0, cnt_w;
+    integer ry, cx, idx, wbad;
+    reg [15:0] p0, p1;
+    reg [4:0] r5v, b5v;
+    reg [5:0] g6v;
+    reg [31:0] expw;
     reg [7:0] r8, g8, b8;
     reg [15:0] exp_rgb;
 
@@ -297,6 +416,25 @@ module tb_frame_sdram;
         load_mode = 1'b0;
         $display("[tb] load done at %0t ns", $time);
 
+        // !!! 关键：必须等显示真正走完几帧再抓帧。
+        // 之前这里直接抓，抓到的还是"读没开始"的状态，
+        // 图像比对结果（57216 个错）其实是假象。
+        repeat (3) @(posedge vs);
+        $display("[tb] display settled at %0t ns", $time);
+
+        repeat (20) @(posedge mem_clk);
+        $display("[drop] rf_wr=%0d rf_rd=%0d drop_on_full=%0d used_max=%0d dry=%0d", c_rfwr, c_rfrd, c_drop, c_rdm, c_low);
+        $display("[seq] popped=%0d bad=%0d starve=%0d", seq_n, seq_bad, c_starve);
+        $display("[bw] rd_en=%0d rd_vld=%0d busy=%0d cyc=%0d fcnt_max=%0d", q_rden, q_vld, q_busy, q_cyc, q_fmax);
+        $display("[bw2] rf_full=%0d win=%0d refvld=%0d", q_full, q_win, q_ref);
+        $display("[cnd] cyc=%0d nwin=%0d nbusy=%0d rstart=%0d", ac, a1, a4, a9);
+        $display("[cnd2] nwin=%0d  nwin_and_nbusy=%0d", b2, b1);
+        $display("[x] fcnt=%0d rgap=%0d rburst=%0d rstart=%0d rf_rd=%0d win=%0d",
+                 xf, xg, xb, xr, xrr, xwin);
+        $display("[bib] burst_cycles=%0d busy_in_burst=%0d", c_burst, c_bib);
+        $display("[disp] cyc=%0d win=%0d rd_en=%0d busy=%0d", d_cyc, d_win, d_rden, d_busy);
+        $display("[vcnt] cyc=%0d lt25=%0d min=%0d max=%0d", v_cyc, v_lt25, vmin, vmax);
+
         repeat (50) @(posedge mem_clk);
         // 图片行 0 的前 16 个字：期望 0x0000 x4, 0x0800 x4, 0x1000 x4, 0x1800 x4
         $display("[w0] %h %h %h %h %h %h %h %h",
@@ -309,6 +447,29 @@ module tb_frame_sdram;
         for (k = 0; k < 200000; k = k + 1)
             if (u_chip.Bank0[k] !== 32'hxxxxxxxx) cnt_w = cnt_w + 1;
         $display("[chk] Bank0 前 200000 字中已写 %0d 个", cnt_w);
+
+        // ---- 逐字比对 SDRAM 内容与期望图案（153600 字）----
+        wbad = 0;
+        for (ry = 0; ry < 480; ry = ry + 1) begin
+            for (cx = 0; cx < 320; cx = cx + 1) begin
+                idx = ry*320 + cx;
+                g6v = (ry & 255) >> 2;
+                r5v = ((cx*2) & 255) >> 3;
+                b5v = ((((cx*2) >> 5) + (ry >> 5)) & 1) ? 5'd31 : 5'd0;
+                p0  = {r5v, g6v, b5v};
+                r5v = ((cx*2+1) & 255) >> 3;
+                b5v = ((((cx*2+1) >> 5) + (ry >> 5)) & 1) ? 5'd31 : 5'd0;
+                p1  = {r5v, g6v, b5v};
+                expw = {p1, p0};
+                if (u_chip.Bank0[idx] !== expw) begin
+                    if (wbad < 10)
+                        $display("[wbad] idx=%0d row=%0d col=%0d got=%h exp=%h",
+                                 idx, ry, cx, u_chip.Bank0[idx], expw);
+                    wbad = wbad + 1;
+                end
+            end
+        end
+        $display("[res] SDRAM content match : %0d/%0d wrong", wbad, 153600);
 
         // 逐行统计：y=120..135 每行有多少字落盘（每行 320 字，索引 y*640+160..+479）
         for (k = 0; k < 16; k = k + 1) begin

@@ -27,7 +27,8 @@ module top_osd_demo #(
     parameter integer PW      = 560,
     parameter integer PH      = 500,
     parameter integer HOLD_FRAMES = 150,        // 每张停留帧数
-    parameter integer KEY_CLK_HZ  = 75_000_000  // 仅仿真时调小以加速
+    parameter integer KEY_CLK_HZ  = 75_000_000, // 仅仿真时调小以加速
+    parameter integer USE_EXT     = 0           // 1=A 路视频改用外部输入（SDRAM 图）
 )(
     input  wire        clk,          // 像素时钟 75MHz
     input  wire        rst_n,
@@ -47,7 +48,12 @@ module top_osd_demo #(
     output wire [1:0]  dbg_effect,
 
     output wire [5:0]  seg_sel,
-    output wire [7:0]  seg_data
+    output wire [7:0]  seg_data,
+
+    input  wire [15:0] ext_rgb,      // 外部视频（RGB565，黑边=0）
+    output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
+    output wire [11:0] raw_x,
+    output wire [11:0] raw_y         // 帧内行号 0..VTOTAL-1
 );
 
     wire rst = ~rst_n;
@@ -83,6 +89,14 @@ module top_osd_demo #(
     test_pattern_b #(.HACTIVE(HACTIVE), .VACTIVE(VACTIVE)) u_pat_b (
         .clk(clk), .rst(rst), .x(act_x), .y(act_y), .rgb(b_rgb)
     );
+
+    // ------------------------------------------------------------------
+    // A 路视频：USE_EXT=1 时用外部输入（SDRAM 帧缓存的图片输出）
+    // ------------------------------------------------------------------
+    wire [23:0] ext_rgb24 = {ext_rgb[15:11], 3'b000,
+                             ext_rgb[10:5],  2'b00,
+                             ext_rgb[4:0],   3'b000};
+    wire [23:0] base_a = USE_EXT ? ext_rgb24 : {a_r, a_g, a_b};
 
     // ------------------------------------------------------------------
     // 菜单
@@ -153,8 +167,8 @@ module top_osd_demo #(
         .swap(trans_swap)
     );
 
-    wire [23:0] src_a = trans_swap ? b_rgb : {a_r, a_g, a_b};
-    wire [23:0] src_b = trans_swap ? {a_r, a_g, a_b} : b_rgb;
+    wire [23:0] src_a = trans_swap ? b_rgb : base_a;
+    wire [23:0] src_b = trans_swap ? base_a : b_rgb;
 
     wire [23:0] trans_rgb;
     transition #(.HACTIVE(HACTIVE)) u_trans (
@@ -236,8 +250,12 @@ module top_osd_demo #(
     assign dbg_prog   = trans_prog;
     assign dbg_effect = ef_trans;
 
+    assign raw_de = bg_de;
+    assign raw_x  = act_x;
+    assign raw_y  = bg_y;
+
     // ------------------------------------------------------------------
-    seg7 #(.CLK_HZ(75_000_000)) u_seg (
+    seg7 #(.CLK_HZ(KEY_CLK_HZ)) u_seg (
         .clk     (clk),
         .rst_n   (rst_n),
         .value   ({13'd0, dbg_item, cfg_ver, dbg_val}),
