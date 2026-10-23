@@ -84,9 +84,10 @@ module frame_buffer #(
     //   只读图片区域只要 9.2M 字/s，余量 3 倍。
     localparam integer IW    = IMG_W / 2;             // 图片每行字数
     localparam integer IT    = IW * IMG_H;            // 图片总字数
-    localparam [20:0] IW21  = IW;
+    localparam [8:0]  IW9   = IW;                     // 9 位（<=511 字/行）
     localparam [19:0] IT_1  = IT - 1;
-    localparam [20:0] X0W   = IMG_X0 / 2;             // 图片左边界的字偏移
+    localparam [10:0] X0W   = IMG_X0 / 2;             // 图片左边界的字偏移
+    localparam [11:0] Y0W   = IMG_Y0;                 // 图片上边界
     localparam [11:0] WB    = WR_LINES;               // 帧首消隐行数 = 写窗口
 
     // ==================================================================
@@ -178,8 +179,15 @@ module frame_buffer #(
     reg         ww_d;
 
     // 紧凑存储：图片内坐标（去掉居中偏移）
-    wire [20:0] word_raw   = ({8'd0, wd_y} - IMG_Y0) * IW21 +
-                             ({10'd0, wd_xw} - X0W);
+    // 注意位宽：参数 IMG_Y0 / IMG_X0 是 32 位 integer，若直接和 12 位信号混算，
+    // 表达式的位宽推导在仿真（32 位有符号）和综合（按实际位宽裁剪）之间可能不一致。
+    // 这里全部先减成明确位宽再乘：dy 0..479（9 位有效）、IW 320（9 位）、
+    // 乘积最大 153280（18 位），最后加到 21 位。
+    wire [11:0] dy12       = wd_y - Y0W;
+    wire [8:0]  dy         = dy12[8:0];
+    wire [10:0] dxw        = wd_xw - X0W;
+    wire [17:0] row_base   = dy * IW9;
+    wire [20:0] word_raw   = {3'd0, row_base} + {10'd0, dxw};
     wire [20:0] word_addr  = {word_raw[18:0], 2'b00};   // 字索引 -> 字节地址
     wire        bfull      = (bn == 3'd4);
     // 4 字 burst 要求：起始字索引 4 对齐，且组内地址连续（同 行、xw 递增）
