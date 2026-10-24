@@ -70,6 +70,7 @@ module frame_buffer #(
     input  wire        rd_bank,        // 读缓冲：0=A(字 0 起) 1=B(字 153600 起)
     input  wire        wr_bank,        // 写缓冲：另一块
     output wire [7:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
+    output wire        wr_idle,        // 写侧彻底排空（FIFO 空 + 无在途 burst）
     output wire [15:0] rgb_out,
     output wire        de_out
 );
@@ -425,5 +426,9 @@ module frame_buffer #(
                 hi <= rf_dout[31:16];
         end
     end
+
+    // 写侧是否彻底排空：换 bank 之前必须等到这里，
+    // 否则最后几个字会写进下一块缓冲（bn/bsend/wvld 在后面声明，故放在模块末尾）
+    assign wr_idle = wf_empty & ~bsend & (bn == 3'd0) & ~wvld;
 
 endmodule

@@ -40,6 +40,7 @@ module bmp_decode #(
     output reg  [11:0] o_sx,
     output reg  [11:0] o_sy,
 
+    output reg         o_eof,          // 本张图字节已收完（电平，bfSize 到点）
     output reg         o_frame_done,   // 一张图解码完成（单拍）
     output reg  [15:0] o_img_w,
     output reg  [15:0] o_img_h,
@@ -83,6 +84,12 @@ module bmp_decode #(
     reg [15:0] h_raw;
     reg [15:0] h_abs;
     reg [31:0] off_raw;
+    // bfSize（文件总字节数）与已收字节数：
+    //   SD 那边按扇区读，一张 640x480 的图要占 1801 扇区，末尾必然拖一点垃圾。
+    //   解出 bfSize 后，收到最后一个字节就拉高 o_eof，读取器据此提前收工，
+    //   这样不同尺寸的图可以混排（每张只读自己的实际长度）。
+    reg [31:0] bf_size;
+    reg [31:0] byte_cnt;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -106,23 +113,32 @@ module bmp_decode #(
             o_sy         <= 12'd0;
             o_rgb565     <= 16'd0;
             o_frame_done <= 1'b0;
+            o_eof        <= 1'b0;
             o_img_w      <= 16'd0;
             o_img_h      <= 16'd0;
             o_hdr_ok     <= 1'b0;
             h_raw        <= 16'd0;
             h_abs        <= 16'd0;
             off_raw      <= 32'd0;
+            bf_size      <= 32'd0;
+            byte_cnt     <= 32'd0;
         end else begin
             o_we         <= 1'b0;
             o_frame_done <= 1'b0;
 
             if (s_valid) begin
+                // 字节计数从文件第 0 字节开始（每张图开始前 bmp_rst 会清零）
+                if (byte_cnt != 32'hFFFF_FFFF) byte_cnt <= byte_cnt + 32'd1;
+                if ((bf_size != 32'd0) && (byte_cnt + 32'd1 >= bf_size))
+                    o_eof <= 1'b1;
+
                 case (state)
                 // ----------------------------------------------
                 S_HDR: begin
                     hdr[hcnt] <= s_data;
                     if (hcnt == 6'd53) begin
                         off_raw  = {hdr[13], hdr[12], hdr[11], hdr[10]};
+                        bf_size  = {hdr[5], hdr[4], hdr[3], hdr[2]};
                         h_raw    = {hdr[23], hdr[22]};
                         top_down <= hdr[25][7];
                         h_abs    = hdr[25][7] ? (~h_raw + 16'd1) : h_raw;

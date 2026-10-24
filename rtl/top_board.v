@@ -39,8 +39,8 @@ module top_board #(
     parameter integer VFP     = 5,
     // SD 卡上的图片布局（裸扇区，PC 端用 tools/make_sd_image.py 生成镜像）
     parameter integer SEC_BASE   = 2048,      // 第 0 张图起始扇区（1MB 偏移）
-    parameter integer SEC_STRIDE = 1801,      // 每张图占 1801 扇区（=921654 字节）
-    parameter integer IMG_NUM    = 6,         // 循环张数
+    parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
+    parameter integer IMG_NUM    = 8,         // 循环张数
     parameter integer HOLD_FRM   = 90         // 每张停留帧数（30fps 下 3 秒）
 )(
     input  wire        clk_50m,       // R7
@@ -193,6 +193,7 @@ module top_board #(
     wire [15:0] fb_rgb;
     wire        fb_de, fb_rdy;
     wire [7:0]  fb_wf_used;
+    wire        fb_wr_idle;
 
     reg         load_mode;
     reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
@@ -246,6 +247,7 @@ module top_board #(
         .rd_bank (rd_bank),
         .wr_bank (wr_bank),
         .wr_fifo_used(fb_wf_used),
+        .wr_idle (fb_wr_idle),
         .rgb_out (fb_rgb),
         .de_out  (fb_de)
     );
@@ -285,6 +287,7 @@ module top_board #(
     reg  [7:0] img_idx;
     reg        rd_en;              // pix 域电平请求（reader 用 done 应答）
     wire       rdr_done;
+    wire       bmp_eof;            // 解码器已收满 bfSize（让读取器提前收工）
 
     sd_bmp_reader #(
         .SEC_BASE(SEC_BASE), .SEC_STRIDE(SEC_STRIDE), .SEC_NUM(SEC_STRIDE)
@@ -302,6 +305,7 @@ module top_board #(
         .enable       (rd_en),
         .img_idx      (img_idx),
         .fifo_used    (fb_wf_used),
+        .stop         (bmp_eof),
         .busy         (rdr_busy),
         .done         (rdr_done),
 
@@ -358,6 +362,7 @@ module top_board #(
         .o_sx       (bmp_sx),
         .o_sy       (bmp_sy),
         .o_rgb565   (bmp_rgb),
+        .o_eof      (bmp_eof),
         .o_frame_done(),
         .o_img_w    (bmp_w),
         .o_img_h    (bmp_h),
@@ -408,6 +413,15 @@ module top_board #(
 
     wire sd_ready  = sdi_sync[1];
     wire rdr_done_p = done_s2;
+
+    // 写侧排空标志跨到像素域（mem 125MHz -> pix 37.5MHz）
+    reg  [1:0] widle_sync;
+    wire       wr_idle_p = widle_sync[1];
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) widle_sync <= 2'b00;
+        else        widle_sync <= {widle_sync[0], fb_wr_idle};
+    end
     wire frame_top = (raw_y == 12'd0) && (raw_x == 12'd0);
 
     always @(posedge clk_pix or negedge rst_n) begin
@@ -472,8 +486,12 @@ module top_board #(
                 LD_LOAD: begin
                     // 注意：这里不再拉高 load_mode。首次之后 load_mode 恒 0，
                     // 读写靠"图片行 vs 非图片行"在时间上分离，读侧永不中断。
-                    if (rdr_done_p) begin
-                        if (fin_dly == 13'd4000) begin
+                    //
+                    // 换 bank 的条件：SD 读完 + 写侧彻底排空 + 64 拍余量。
+                    // 只等固定 4000 拍是不够的：最后一批像素可能正卡在写窗口外，
+                    // 窗口最坏 21ms 才开，提前换 bank 会把尾巴写进下一块缓冲。
+                    if (rdr_done_p && wr_idle_p) begin
+                        if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             rd_bank   <= wr_bank;   // 显示切到刚写好的那块
                             wr_bank   <= ~wr_bank;  // 下一张写另一块
