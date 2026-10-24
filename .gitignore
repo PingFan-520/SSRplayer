@@ -53,3 +53,6 @@ sim/scale_out.raw
 sim/scale_out.png
 sim/chain.log
 sim/scale_in.bmp
+
+sim/work_fsm/
+sim/fsm*.log

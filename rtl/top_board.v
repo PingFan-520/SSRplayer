@@ -408,6 +408,9 @@ module top_board #(
 
     reg [2:0]  ld_st;
     reg [12:0] fin_dly;
+    reg        clr_ok;          // 清屏完成标志（clr_done 只有 1 拍，必须锁存）
+    reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
+    reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
     reg [15:0] hold_frm;
     reg [1:0]  sdi_sync;
     reg        done_s1, done_s2;
@@ -451,6 +454,9 @@ module top_board #(
             img_idx   <= 8'd0;
             rd_en     <= 1'b0;
             sc_clr    <= 1'b0;
+            clr_ok    <= 1'b0;
+            clr_wdog  <= 24'd0;
+            ld_wdog   <= 28'd0;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
@@ -460,9 +466,11 @@ module top_board #(
             case (ld_st)
                 LD_WAIT: begin
                     if (sd_ready) begin
-                        sc_clr  <= 1'b1;     // 先清屏，再开始读图
-                        fin_dly <= 13'd0;
-                        ld_st   <= LD_CLEAR;
+                        sc_clr   <= 1'b1;     // 先清屏，再开始读图
+                        clr_ok   <= 1'b0;
+                        clr_wdog <= 26'd0;
+                        fin_dly  <= 13'd0;
+                        ld_st    <= LD_CLEAR;
                     end
                 end
 
@@ -471,11 +479,21 @@ module top_board #(
                 LD_CLEAR: begin
                     sc_clr <= 1'b0;
                     // 清屏结束还要等写 FIFO 排空：清屏最后那 256 个字可能正卡在
-                    // 写窗口外。FIFO 满着就开读的话，刚开始的像素会被丢掉
-                    // （像素通路上没有反压），图头会出现一条条没写进去的空洞。
-                    if (sc_clr_done && wr_idle_p) begin
-                        fin_dly <= 13'd0;
-                        ld_st   <= LD_ARM;
+                    // 写窗口外。FIFO 满着就开读的话，刚开始的像素会被丢掉。
+                    //
+                    // 关键：clr_done 是**1 拍脉冲**，而它出现时 FIFO 里还有几百个字
+                    // （wr_idle 还是 0）。直接写 "clr_done && wr_idle" 会漏掉那唯一
+                    // 1 拍 -> 永久停在 CLEAR（上板实测：黑屏 + 数码管 03）。
+                    // 所以先把完成标志锁存下来。
+                    if (sc_clr_done) clr_ok <= 1'b1;
+
+                    if (!wr_idle_p) clr_wdog <= clr_wdog + 26'd1;
+
+                    if ((clr_ok && wr_idle_p) || (clr_wdog == 26'h3FFFFFF)) begin
+                        fin_dly  <= 13'd0;
+                        clr_ok   <= 1'b0;
+                        clr_wdog <= 26'd0;
+                        ld_st    <= LD_ARM;
                     end
                 end
 
@@ -484,9 +502,10 @@ module top_board #(
                 // 避免多比特总线正在变化时被采样。
                 LD_ARM: begin
                     if (fin_dly == 13'd16) begin
-                        rd_en   <= 1'b1;
-                        fin_dly <= 13'd0;
-                        ld_st   <= LD_LOAD;
+                        rd_en    <= 1'b1;
+                        ld_wdog  <= 28'd0;
+                        fin_dly  <= 13'd0;
+                        ld_st    <= LD_LOAD;
                     end else begin
                         fin_dly <= fin_dly + 13'd1;
                     end
@@ -501,9 +520,16 @@ module top_board #(
                     // 窗口最坏 21ms 才开，提前换 bank 会把尾巴写进下一块缓冲。
                     // 再要求"当前不在图片行"：换 bank 只在消隐期发生，
                     // 否则这一帧会上面旧图、下面新图（看起来像两张图拼接）
-                    if (rdr_done_p && wr_idle_p && !in_img_row) begin
+                    // 加载超时保护：SD 万一读不完（坏块/接触不良），
+                    // 3 秒后强制收工，至少把已经写进去的部分显示出来，
+                    // 而不是永远卡在 LOAD（黑屏）。
+                    if (!rdr_done_p) ld_wdog <= ld_wdog + 28'd1;
+
+                    if ((rdr_done_p && wr_idle_p && !in_img_row) ||
+                        (ld_wdog == 28'hFFFFFFF)) begin
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
+                            ld_wdog   <= 28'd0;
                             rd_bank   <= wr_bank;   // 显示切到刚写好的那块
                             wr_bank   <= ~wr_bank;  // 下一张写另一块
                             load_mode <= 1'b0;
@@ -521,6 +547,8 @@ module top_board #(
                         img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
                                                                      : (img_idx + 8'd1);
                         sc_clr    <= 1'b1;
+                        clr_ok    <= 1'b0;
+                        clr_wdog  <= 24'd0;
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end
