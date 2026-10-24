@@ -199,6 +199,22 @@ module frame_buffer #(
     reg  [3:0]  bgap;          // burst 之间的 NOP 间隔（背靠背会被控制器忽略）
     reg         ww_d;
 
+    // 尾部残组：流结束后可能只剩 1~3 个字凑不满 4 字 burst。
+    // 若不处理，bn 永远 != 0 -> wr_idle 不拉高 -> 上层永远等不到"加载完成"，
+    // 只能靠看门狗收尾（上板表现：一直停在 LOAD、画面反复闪）。
+    // FIFO 空且无 burst 持续 256 拍，就把残组丢掉。
+    // 超时值要大于"两个字之间的最大间隔"：
+    //   正常源一个 32bit 字约 3.8us；写窗口关闭时 FIFO 是满的（wf_empty=0），
+    //   所以只有"流真的结束"才会连续 67ms 空。2^23 / 125MHz = 67ms。
+    reg [22:0]  idle_tmr;
+    wire        tail_drop = (idle_tmr == 23'h7FFFFF) && (bn != 3'd0);
+
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem)                          idle_tmr <= 23'd0;
+        else if (!wf_empty || bsend || wvld)   idle_tmr <= 23'd0;
+        else if (idle_tmr != 23'h7FFFFF)       idle_tmr <= idle_tmr + 23'd1;
+    end
+
     // 紧凑存储：图片内坐标（去掉居中偏移）
     // 注意位宽：参数 IMG_Y0 / IMG_X0 是 32 位 integer，若直接和 12 位信号混算，
     // 表达式的位宽推导在仿真（32 位有符号）和综合（按实际位宽裁剪）之间可能不一致。
@@ -278,6 +294,8 @@ module frame_buffer #(
                 bsend <= 1'b1;
                 bi    <= 2'd0;
                 bn    <= 3'd0;
+            end else if (tail_drop) begin
+                bn <= 3'd0;              // 流已结束，残组丢弃（尾部 1~3 个字）
             end else if (wd_drop) begin
                 bn <= 3'd0;              // 地址跳变/不对齐，丢弃整组残留
             end else if (wd_take) begin
