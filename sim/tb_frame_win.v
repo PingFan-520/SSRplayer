@@ -390,7 +390,7 @@ module tb_frame_win;
         repeat (200) @(posedge pix_clk);
 
         // 写 640x480 图案到 (320,120)
-        load_mode = 1'b0;          // 实验：只写消隐期（双缓冲节流模式）
+        load_mode = 1'b0;          // 双缓冲路径：只写消隐期，读不停
         $display("[tb] writing 640x480 pattern...");
         for (wyy = 0; wyy < 480; wyy = wyy + 1) begin
             for (wxx = 0; wxx < 640; wxx = wxx + 1) begin

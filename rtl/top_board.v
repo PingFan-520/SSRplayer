@@ -44,7 +44,7 @@ module top_board #(
     parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
     // 双缓冲开关：1 = 双缓冲（换图不黑屏）；0 = 单缓冲（换图时黑一下，但路径最简单）
     // 上板出问题时可先置 0 验证"是不是双缓冲引入的"
-    parameter integer USE_DBL    = 1
+    parameter integer USE_DBL    = 0
 )(
     input  wire        clk_50m,       // R7
 

@@ -168,8 +168,17 @@ module frame_buffer #(
     //   图片区 480 行的读需求是 7.2M 字/s，控制器只有 7.5M，
     //   读写必须时间分离：图片区给读，其余 270 行（11.9ms）给写。
     // ==================================================================
-    wire       in_img_rows = (y >= IMG_TOP[11:0]) && (y < IMG_BOT[11:0]);
-    wire       wr_window   = load_mode | ~in_img_rows;
+    // 2026-10-25：写窗口 = "图片行之外"，但让出图片行前 48 行给"读流归零+预灌"。
+    //
+    // 双缓冲必须让读在图片行开始前有时间重新对齐：读 FIFO 在写窗口里被清空，
+    // 若窗口一直开到图片行前一刻，FIFO 是空的，图像头几行会取空 -> 整幅错位。
+    //   写窗口：行 0..96 + 625..749（222 行 = 9.9ms）
+    //   预灌区：行 97..144（2.1ms，rd_cnt 从这里归零并把 2048 字 FIFO 灌满）
+    //   图片区：行 145..624（读，显示端消费）
+    // 读与写在时间上完全不重叠；每个方向切换还各有 63 拍静默（见 rq/wq）。
+    localparam integer PRIME_R = 48;
+    wire       prime_win = (y >= (IMG_TOP - PRIME_R)) && (y < IMG_TOP[11:0]);
+    wire       wr_window = load_mode | (y < (IMG_TOP - PRIME_R)) | (y >= IMG_BOT[11:0]);
     reg  [2:0] ww_sync;
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) ww_sync <= 3'b000;
@@ -198,6 +207,8 @@ module frame_buffer #(
     reg  [1:0]  bi;
     reg  [3:0]  bgap;          // burst 之间的 NOP 间隔（背靠背会被控制器忽略）
     reg         ww_d;
+    reg  [5:0]  rq, wq;        // 读写方向切换的静默计数
+    reg         rburst;        // 读 burst 进行中（写 burst 启动前必须为 0）
 
     // 尾部残组：流结束后可能只剩 1~3 个字凑不满 4 字 burst。
     // 若不处理，bn 永远 != 0 -> wr_idle 不拉高 -> 上层永远等不到"加载完成"，
@@ -290,7 +301,8 @@ module frame_buffer #(
             // 若不加 wr_win_m 门控，读相位里也会冒出写 burst，
             // 控制器会把命令丢掉/串行错（实测 40 个 burst 没落盘，
             // 上板表现就是整屏花屏、多张图叠拼）。
-            end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy && wr_win_m) begin
+            end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy && wr_win_m &&
+                         (rq == 6'd63) && ~rburst) begin
                 bsend <= 1'b1;
                 bi    <= 2'd0;
                 bn    <= 3'd0;
@@ -351,7 +363,6 @@ module frame_buffer #(
     //   就拉高 Sdr_busy，busy 期间的读命令被丢弃，图像只剩 1.4% 正确。
     //   所以这里必须严格 4 拍一组，且每组的起点要等 busy 落下。
     reg  [1:0] rbi;
-    reg        rburst;
     reg  [3:0] rgap;             // 跨 SDRAM 行时的间隔（PRE + ACT）
 
     // ==================================================================
@@ -375,7 +386,7 @@ module frame_buffer #(
     // 否则窗口边界处会出现"读写同时"（APUG011 禁止）
     wire       rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
                         (rf_used < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0) &
-                        ~bsend;
+                        ~bsend & (wq == 6'd63);
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin
@@ -464,6 +475,18 @@ module frame_buffer #(
 
             if (in_img && !xr[0])
                 hi <= rf_dout[31:16];
+        end
+    end
+
+    // 读写方向切换的静默计数：读 burst 停了 63 拍才允许发写 burst，反之亦然。
+    // 实测控制器内部有流水，只判 ~bsend/~rburst 不足以保证最后一条命令已退出。
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem) begin
+            rq <= 6'd63;
+            wq <= 6'd63;
+        end else begin
+            rq <= rd_go ? 6'd0 : ((rq == 6'd63) ? rq : (rq + 6'd1));
+            wq <= bsend ? 6'd0 : ((wq == 6'd63) ? wq : (wq + 6'd1));
         end
     end
 

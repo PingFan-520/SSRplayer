@@ -21,6 +21,7 @@ module tb_fsm;
     parameter integer HOLD_FRM = 3;     // 让轮播快速走完整轮
     parameter integer IMG_NUM  = 8;
     parameter integer IMG_Y0   = 120;
+    parameter integer USE_DBL  = 0;      // 与 top_board 一致（0=单缓冲）
     parameter integer V_OFF    = 25;
 
     // ---- 激励 ----
@@ -117,6 +118,7 @@ module tb_fsm;
                 end
 
                 LD_LOAD: begin
+                    if (!USE_DBL[0]) load_mode <= 1'b1;   // 单缓冲：整帧只写不读
                     // 注意：这里不再拉高 load_mode。首次之后 load_mode 恒 0，
                     // 读写靠"图片行 vs 非图片行"在时间上分离，读侧永不中断。
                     //
@@ -135,8 +137,13 @@ module tb_fsm;
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             ld_wdog   <= 28'd0;
-                            rd_bank   <= wr_bank;   // 显示切到刚写好的那块
-                            wr_bank   <= ~wr_bank;  // 下一张写另一块
+                            if (USE_DBL[0]) begin
+                                rd_bank <= wr_bank;   // 显示切到刚写好的那块
+                                wr_bank <= ~wr_bank;  // 下一张写另一块
+                            end else begin
+                                rd_bank <= 1'b0;      // 单缓冲：永远用 bank0
+                                wr_bank <= 1'b0;
+                            end
                             load_mode <= 1'b0;
                             hold_frm  <= 16'd0;
                             ld_st     <= LD_SHOW;
