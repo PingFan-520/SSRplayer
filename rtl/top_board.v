@@ -113,7 +113,7 @@ module top_board #(
         .reset      (1'b0),
         .stdby      (1'b0),
         .extlock    (pll_lock),
-        .load_reg   (5'b00000),
+        .load_reg   (1'b0),
         .psclk      (1'b0),
         .psdown     (1'b0),
         .psstep     (1'b0),
