@@ -54,6 +54,25 @@ python tools/make_sd_image.py
 
 写入卡：**Win32DiskImager / Rufus / balenaEtcher**，选 `sd_image.img`。
 
+或者用项目自带的脚本（Windows，需管理员）：
+
+```
+tools\write_sd.bat    右键 -> 以管理员身份运行    # 写入（含写后校验）
+tools\verify_sd.bat   右键 -> 以管理员身份运行    # 全量 SHA256 只读校验
+```
+
+### 写卡踩过的坑（重要）
+
+| 尝试 | 结果 |
+| --- | --- |
+| `Set-Disk -IsOffline $true` | **不可用**：`Removable media cannot be set to offline` |
+| `mountvol F: /P` 卸载后立刻写 | **失败**：`设备未就绪` —— 卸载会让读卡器重新枚举，句柄拿不到设备 |
+| **`FSCTL_LOCK_VOLUME` + `FSCTL_DISMOUNT_VOLUME`** | **成功**：设备保持就绪，只是独占写访问；卷句柄要一直持有到写完 |
+
+最终 `write_sd.ps1` 走的第三条路，并带 6 次打开重试（应对枚举抖动）。
+写入日志 `sd_write_log.txt` 会记录三处校验：1MB 处 `BM`、前 4096 字节逐字节、
+第 6 张图起点。
+
 > 换自己的图：把 640×480 24bit BMP 放进 `图片资源/`，或
 > `python tools/make_sd_image.py -o my.img a.bmp b.bmp c.bmp`。
 > 张数上限 255；`top_board.v` 的 `IMG_NUM` 要改成实际张数。

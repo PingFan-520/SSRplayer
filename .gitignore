@@ -40,3 +40,7 @@ sim/*.bak
 
 # ---- SD 卡镜像（本地生成）----
 *.img
+
+# ---- 写卡日志 ----
+sd_write_log.txt
+sd_verify_log.txt
