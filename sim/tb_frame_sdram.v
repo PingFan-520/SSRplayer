@@ -138,6 +138,9 @@ module tb_frame_sdram;
         .y       (vcnt),          // 帧内行号 0..749，写窗口 = 前 25 行
         .rd_buf  (1'b0),
         .load_mode(load_mode),
+        .rd_bank (1'b0),
+        .wr_bank (1'b0),
+        .wr_fifo_used(),
         .rgb_out (fb_rgb),
         .de_out  (fb_de)
     );

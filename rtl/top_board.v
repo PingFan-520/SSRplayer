@@ -192,8 +192,10 @@ module top_board #(
     // ------------------------------------------------------------------
     wire [15:0] fb_rgb;
     wire        fb_de, fb_rdy;
+    wire [7:0]  fb_wf_used;
 
     reg         load_mode;
+    reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
 
     // 写侧数据源（BMP 解码器输出）
     wire        bmp_we;
@@ -234,6 +236,9 @@ module top_board #(
         .y       (raw_y),
         .rd_buf  (1'b0),
         .load_mode(load_mode),
+        .rd_bank (rd_bank),
+        .wr_bank (wr_bank),
+        .wr_fifo_used(fb_wf_used),
         .rgb_out (fb_rgb),
         .de_out  (fb_de)
     );
@@ -289,6 +294,7 @@ module top_board #(
 
         .enable       (rd_en),
         .img_idx      (img_idx),
+        .fifo_used    (fb_wf_used),
         .busy         (rdr_busy),
         .done         (rdr_done),
 
@@ -386,7 +392,9 @@ module top_board #(
             ld_st     <= LD_WAIT;
             img_idx   <= 8'd0;
             rd_en     <= 1'b0;
-            load_mode <= 1'b1;
+            load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
+            rd_bank   <= 1'b0;
+            wr_bank   <= 1'b0;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
@@ -413,11 +421,14 @@ module top_board #(
                 end
 
                 LD_LOAD: begin
-                    load_mode <= 1'b1;
+                    // 注意：这里不再拉高 load_mode。首次之后 load_mode 恒 0，
+                    // 读写靠"图片行 vs 非图片行"在时间上分离，读侧永不中断。
                     if (rdr_done_p) begin
                         if (fin_dly == 13'd4000) begin
-                            load_mode <= 1'b0;
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
+                            rd_bank   <= wr_bank;   // 显示切到刚写好的那块
+                            wr_bank   <= ~wr_bank;  // 下一张写另一块
+                            load_mode <= 1'b0;
                             hold_frm  <= 16'd0;
                             ld_st     <= LD_SHOW;
                         end else begin
@@ -445,9 +456,9 @@ module top_board #(
     // 画面 + 菜单
     // ------------------------------------------------------------------
     // 数码管调试字（**要把数码管读数反过来拼**）：
-    //   高半字节 = {img_idx[2:0], rdr_busy}   低半字节 = {ld_st, rd_en, sd_ready}
-    //   ld_st: 0=WAIT 1=ARM 2=LOAD 3=SHOW
-    wire [7:0]  dbg_ext = {img_idx[2:0], rdr_busy, ld_st, rd_en, sd_ready};
+    //   高半字节 = {img_idx[1:0], rd_bank, wr_bank}
+    //   低半字节 = {ld_st, 1'b0, sd_ready}，ld_st: 0=WAIT 1=ARM 2=LOAD 3=SHOW
+    wire [7:0]  dbg_ext = {img_idx[1:0], rd_bank, wr_bank, ld_st, sd_ready};
 
     wire        menu_open;
     wire [2:0]  dbg_item;

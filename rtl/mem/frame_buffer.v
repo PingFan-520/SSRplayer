@@ -66,7 +66,10 @@ module frame_buffer #(
     input  wire [11:0] x,
     input  wire [11:0] y,
     input  wire        rd_buf,
-    input  wire        load_mode,      // 1=加载图片：整帧只写不读
+    input  wire        load_mode,      // 1=首次加载：整帧只写不读
+    input  wire        rd_bank,        // 读缓冲：0=A(字 0 起) 1=B(字 153600 起)
+    input  wire        wr_bank,        // 写缓冲：另一块
+    output wire [7:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
     output wire [15:0] rgb_out,
     output wire        de_out
 );
@@ -89,6 +92,10 @@ module frame_buffer #(
     localparam [10:0] X0W   = IMG_X0 / 2;             // 图片左边界的字偏移
     localparam [11:0] Y0W   = IMG_Y0;                 // 图片上边界
     localparam [11:0] WB    = WR_LINES;               // 帧首消隐行数 = 写窗口
+    localparam [20:0] IT21  = IT;                     // 一块缓冲的字数（bank 偏移）
+    // 双缓冲：写窗口改成"图片行之外"，图片区留给读，两者在时间上完全不重叠
+    localparam integer IMG_TOP = IMG_Y0 + V_OFFSET;
+    localparam integer IMG_BOT = IMG_Y0 + V_OFFSET + IMG_H;
 
     // ==================================================================
     // 像素域：两像素拼成一个 32bit 字（偶数像素在低半，奇数在高半）
@@ -113,12 +120,16 @@ module frame_buffer #(
     assign wf_wr   = pair_now && ~wf_full;
     assign wf_data = {wr_buf, wr_y, wr_x[11:1], prgb, wr_rgb};
 
+    wire [8:0] wf_used;
+
     afifo #(.DW(56), .AW(8)) u_wfifo (
         .clk_w(pix_clk), .clk_r(clk_mem), .aclr(pix_rst),
         .wr_en(wf_wr), .wr_data(wf_data), .wr_full(wf_full),
         .rd_en(wf_rd), .rd_data(wf_dout), .rd_empty(wf_empty),
-        .rd_valid(wf_rvld)
+        .rd_valid(wf_rvld), .wr_used(wf_used)
     );
+
+    assign wr_fifo_used = wf_used[7:0];
 
     always @(posedge pix_clk or posedge pix_rst) begin
         if (pix_rst) begin
@@ -146,9 +157,12 @@ module frame_buffer #(
     wire [31:0] wd_rgb = wf_dout[31:0];
 
     // ==================================================================
-    // 写窗口（帧首消隐行）
+    // 写窗口：首次加载时整帧可写；正常运行时只写"图片行之外"的 270 行
+    //   图片区 480 行的读需求是 7.2M 字/s，控制器只有 7.5M，
+    //   读写必须时间分离：图片区给读，其余 270 行（11.9ms）给写。
     // ==================================================================
-    wire       wr_window = load_mode | (y < WB);
+    wire       in_img_rows = (y >= IMG_TOP[11:0]) && (y < IMG_BOT[11:0]);
+    wire       wr_window   = load_mode | ~in_img_rows;
     reg  [2:0] ww_sync;
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) ww_sync <= 3'b000;
@@ -188,7 +202,9 @@ module frame_buffer #(
     wire [10:0] dxw        = wd_xw - X0W;
     wire [17:0] row_base   = dy * IW9;
     wire [20:0] word_raw   = {3'd0, row_base} + {10'd0, dxw};
-    wire [20:0] word_addr  = {word_raw[18:0], 2'b00};   // 字索引 -> 字节地址
+    wire [20:0] wr_bank_off = wr_bank ? IT21 : 21'd0;
+    wire [20:0] word_addr   = {word_raw[18:0], 2'b00} +
+                              {wr_bank_off[18:0], 2'b00};  // 字索引 + bank 偏移
     wire        bfull      = (bn == 3'd4);
     // 4 字 burst 要求：起始字索引 4 对齐，且组内地址连续（同 行、xw 递增）
     wire        badr_ok    = (wd_xw[1:0] == 2'b00);
@@ -349,7 +365,9 @@ module frame_buffer #(
 
     assign app_rd_en   = rd_go;
     wire [20:0] rd_raw  = {1'b0, rd_cnt};
-    assign app_rd_addr = {rd_raw[18:0], 2'b00};        // 字索引 -> 字节地址
+    wire [20:0] rd_bank_off = rd_bank ? IT21 : 21'd0;
+    assign app_rd_addr = {rd_raw[18:0], 2'b00} +
+                         {rd_bank_off[18:0], 2'b00};
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin

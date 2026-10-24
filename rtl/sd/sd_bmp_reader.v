@@ -46,6 +46,9 @@ module sd_bmp_reader #(
     // ---- 控制（电平）----
     input  wire        enable,         // 1 = 开始读 img_idx 对应的一张图
     input  wire [7:0]  img_idx,
+    // 双缓冲下写只在"图片行之外"进行，SD 必须能被反压：
+    // 写 FIFO 快满时停在上一个扇区之间等，而不是把像素丢掉
+    input  wire [7:0]  fifo_used,
     output reg         busy,           // 正在读
     output reg         done,           // 读完（电平保持到 enable 撤销）
 
@@ -74,12 +77,14 @@ module sd_bmp_reader #(
     reg  en_s1, en_s2;
     reg  [7:0] ix_s1, ix_s2;
     reg  sdi_s1, sdi_s2;
+    reg  [7:0] fu_s1, fu_s2;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             en_s1  <= 1'b0;  en_s2  <= 1'b0;
             ix_s1  <= 8'd0;  ix_s2  <= 8'd0;
             sdi_s1 <= 1'b0;  sdi_s2 <= 1'b0;
+            fu_s1  <= 8'd0;  fu_s2  <= 8'd0;
         end else begin
             en_s1  <= enable;
             en_s2  <= en_s1;
@@ -87,6 +92,8 @@ module sd_bmp_reader #(
             ix_s2  <= ix_s1;
             sdi_s1 <= sd_init_done;
             sdi_s2 <= sdi_s1;
+            fu_s1  <= fifo_used;
+            fu_s2  <= fu_s1;
         end
     end
 
@@ -168,12 +175,14 @@ module sd_bmp_reader #(
                 S_GAP: begin
                     // 等 sd_read 收完 CRC、rd_busy 落下
                     if (!rd_busy) begin
+                        // 一个扇区会往写 FIFO 灌 128 个字（512B / 4B/字），
+                        // 余量不足就先停在这里等显示端消费
                         if (sec_cnt + 16'd1 >= SEC_NUM[15:0]) begin
                             busy    <= 1'b0;
                             done    <= 1'b1;
                             started <= 1'b0;
                             st      <= S_IDLE;
-                        end else begin
+                        end else if (fu_s2 < 8'd120) begin
                             sec_cnt  <= sec_cnt + 16'd1;
                             word_cnt <= 9'd0;
                             st       <= S_CMD;
