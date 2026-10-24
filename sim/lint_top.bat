@@ -25,6 +25,7 @@ if exist lint_work rmdir /s /q lint_work
   "%PRJ%\rtl\video\test_pattern_b.v" ^
   "%PRJ%\rtl\video\pattern_src.v" ^
   "%PRJ%\rtl\video\bmp_decode.v" ^
+  "%PRJ%\rtl\video\bmp_scale.v" ^
   "%PRJ%\rtl\sd\sd_init.v" ^
   "%PRJ%\rtl\sd\sd_read.v" ^
   "%PRJ%\rtl\sd\sd_ctrl_top.v" ^

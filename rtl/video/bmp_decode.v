@@ -33,6 +33,13 @@ module bmp_decode #(
     output reg  [11:0] o_y,
     output reg  [15:0] o_rgb565,
 
+    // 源坐标（给缩放器用，与 o_we 同拍）
+    //   o_sx = 行内列号 0..img_w-1
+    //   o_sy = **显示序**行号 0..img_h-1（自底向上的 BMP 已经翻转过，
+    //         所以 o_sy 总是从 0 递增，缩放器可以只按 o_sy 做纵向采样）
+    output reg  [11:0] o_sx,
+    output reg  [11:0] o_sy,
+
     output reg         o_frame_done,   // 一张图解码完成（单拍）
     output reg  [15:0] o_img_w,
     output reg  [15:0] o_img_h,
@@ -95,6 +102,8 @@ module bmp_decode #(
             o_we         <= 1'b0;
             o_x          <= 12'd0;
             o_y          <= 12'd0;
+            o_sx         <= 12'd0;
+            o_sy         <= 12'd0;
             o_rgb565     <= 16'd0;
             o_frame_done <= 1'b0;
             o_img_w      <= 16'd0;
@@ -164,6 +173,8 @@ module bmp_decode #(
                         o_we     <= 1'b1;
                         o_x      <= x0 + col;
                         o_y      <= scr_y;
+                        o_sx     <= col[11:0];
+                        o_sy     <= (top_down ? row : (img_h - 16'd1 - row));
                         o_rgb565 <= to565(s_data, pix[15:8], pix[7:0]);   // R = s_data
 
                         if (col == img_w - 16'd1) begin

@@ -44,3 +44,7 @@ sim/*.bak
 # ---- 写卡日志 ----
 sd_write_log.txt
 sd_verify_log.txt
+
+# ---- 仿真临时文件 ----
+sim/work_scale/
+sim/scale.log

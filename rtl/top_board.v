@@ -197,15 +197,22 @@ module top_board #(
     reg         load_mode;
     reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
 
-    // 写侧数据源（BMP 解码器输出）
-    wire        bmp_we;
-    wire [11:0] bmp_x, bmp_y;
-    wire [15:0] bmp_rgb;
+    // 图片区在屏幕上的位置（与 frame_buffer 的 IMG_X0/IMG_Y0 保持一致）
+    localparam integer IMG_X0 = 320;
+    localparam integer IMG_Y0 = 120;
+
+    // 写侧数据源：BMP 解码 -> 自适应缩放 -> 帧缓存
+    wire        sc_we;
+    wire [11:0] sc_x, sc_y;
+    wire [15:0] sc_rgb;
+    wire [2:0]  sc_k;
+    reg         sc_clr;               // 换图前清屏（把整个 640x480 框写黑）
+    wire        sc_clr_done, sc_clr_busy;
 
     frame_buffer #(
         .FB_W(1280), .FB_H(720), .VACTIVE(720),
         .WR_LINES(25), .V_OFFSET(25),
-        .IMG_W(640), .IMG_H(480), .IMG_X0(320), .IMG_Y0(120)
+        .IMG_W(640), .IMG_H(480), .IMG_X0(IMG_X0), .IMG_Y0(IMG_Y0)
     ) u_fb (
         .app_wr_addr  (fb_wr_addr),
         .app_wr_din   (fb_wr_din),
@@ -223,10 +230,10 @@ module top_board #(
 
         .pix_clk (clk_pix),
         .pix_rst (~rst_n),
-        .wr_en   (bmp_we),
-        .wr_x    (bmp_x),
-        .wr_y    (bmp_y),
-        .wr_rgb  (bmp_rgb),
+        .wr_en   (sc_we),
+        .wr_x    (IMG_X0 + sc_x),
+        .wr_y    (IMG_Y0 + sc_y),
+        .wr_rgb  (sc_rgb),
         .wr_buf  (1'b0),
         .wr_ready(fb_rdy),
 
@@ -335,6 +342,10 @@ module top_board #(
         end
     end
 
+    wire        bmp_we;
+    wire [11:0] bmp_sx, bmp_sy, bmp_x, bmp_y;
+    wire [15:0] bmp_rgb, bmp_w, bmp_h;
+
     bmp_decode u_bmp (
         .clk        (clk_pix),
         .rst        (~rst_n | bmp_rst),
@@ -344,11 +355,37 @@ module top_board #(
         .o_we       (bmp_we),
         .o_x        (bmp_x),
         .o_y        (bmp_y),
+        .o_sx       (bmp_sx),
+        .o_sy       (bmp_sy),
         .o_rgb565   (bmp_rgb),
         .o_frame_done(),
-        .o_img_w    (),
-        .o_img_h    (),
+        .o_img_w    (bmp_w),
+        .o_img_h    (bmp_h),
         .o_hdr_ok   ()
+    );
+
+    // 自适应缩放：任意分辨率的图 -> 640x480 框内（2^k 缩小 + 居中）
+    bmp_scale #(.DW(640), .DH(480)) u_scale (
+        .clk      (clk_pix),
+        .rst      (~rst_n),
+
+        .s_we     (bmp_we),
+        .s_sx     (bmp_sx),
+        .s_sy     (bmp_sy),
+        .s_rgb    (bmp_rgb),
+        .img_w    (bmp_w),
+        .img_h    (bmp_h),
+
+        .clr      (sc_clr),
+        .clr_done (sc_clr_done),
+        .clr_busy (sc_clr_busy),
+
+        .o_rdy    (fb_rdy),
+        .o_we     (sc_we),
+        .o_x      (sc_x),
+        .o_y      (sc_y),
+        .o_rgb    (sc_rgb),
+        .o_k      (sc_k)
     );
 
     // ------------------------------------------------------------------
@@ -357,12 +394,13 @@ module top_board #(
     //   LOAD : load_mode=1，整帧只写不读；启动一次扇区读
     //   SHOW : load_mode=0，正常显示；停留 HOLD_FRM 帧后换下一张
     // ------------------------------------------------------------------
-    localparam [1:0] LD_WAIT = 2'd0,
-                     LD_ARM  = 2'd1,      // 换图后先让 img_idx 稳定
-                     LD_LOAD = 2'd2,
-                     LD_SHOW = 2'd3;
+    localparam [2:0] LD_WAIT  = 3'd0,
+                     LD_CLEAR = 3'd1,     // 把整个图片区写黑（缩放后留边不会残留上一张）
+                     LD_ARM   = 3'd2,     // 换图后先让 img_idx 稳定
+                     LD_LOAD  = 3'd3,
+                     LD_SHOW  = 3'd4;
 
-    reg [1:0]  ld_st;
+    reg [2:0]  ld_st;
     reg [12:0] fin_dly;
     reg [15:0] hold_frm;
     reg [1:0]  sdi_sync;
@@ -392,6 +430,7 @@ module top_board #(
             ld_st     <= LD_WAIT;
             img_idx   <= 8'd0;
             rd_en     <= 1'b0;
+            sc_clr    <= 1'b0;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
@@ -401,9 +440,19 @@ module top_board #(
             case (ld_st)
                 LD_WAIT: begin
                     if (sd_ready) begin
-                        rd_en   <= 1'b1;
+                        sc_clr  <= 1'b1;     // 先清屏，再开始读图
                         fin_dly <= 13'd0;
-                        ld_st   <= LD_LOAD;
+                        ld_st   <= LD_CLEAR;
+                    end
+                end
+
+                // 清屏：把 640x480 框整块写 0，避免缩放留边处露出上一张的内容。
+                // 153600 字，只在写窗口里跑，约 57ms（首张 load_mode=1 时约 20ms）。
+                LD_CLEAR: begin
+                    sc_clr <= 1'b0;
+                    if (sc_clr_done) begin
+                        fin_dly <= 13'd0;
+                        ld_st   <= LD_ARM;
                     end
                 end
 
@@ -442,8 +491,9 @@ module top_board #(
                     if (hold_frm >= HOLD_FRM[15:0]) begin
                         img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
                                                                      : (img_idx + 8'd1);
+                        sc_clr    <= 1'b1;
                         fin_dly   <= 13'd0;
-                        ld_st     <= LD_ARM;
+                        ld_st     <= LD_CLEAR;
                     end
                 end
 
@@ -455,9 +505,9 @@ module top_board #(
     // ------------------------------------------------------------------
     // 画面 + 菜单
     // ------------------------------------------------------------------
-    // 数码管调试字（**要把数码管读数反过来拼**）：
-    //   高半字节 = {img_idx[1:0], rd_bank, wr_bank}
-    //   低半字节 = {ld_st, 1'b0, sd_ready}，ld_st: 0=WAIT 1=ARM 2=LOAD 3=SHOW
+    // 数码管调试字：[7:6]img_idx[1:0] [5]rd_bank [4]wr_bank
+    //                [3:1]ld_st [0]sd_ready
+    //   ld_st: 0=WAIT 1=CLEAR 2=ARM 3=LOAD 4=SHOW
     wire [7:0]  dbg_ext = {img_idx[1:0], rd_bank, wr_bank, ld_st, sd_ready};
 
     wire        menu_open;
