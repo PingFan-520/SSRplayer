@@ -48,7 +48,7 @@ module sd_bmp_reader #(
     input  wire [7:0]  img_idx,
     // 双缓冲下写只在"图片行之外"进行，SD 必须能被反压：
     // 写 FIFO 快满时停在上一个扇区之间等，而不是把像素丢掉
-    input  wire [8:0]  fifo_used,      // 9 位：满 = 256
+    input  wire [9:0]  fifo_used,      // 10 位：满 = 512
     // 解码器已经收满 bfSize 字节 -> 不用再读后面的填充扇区
     // （不同尺寸的图混排时，每张只读自己的实际长度）
     input  wire        stop,
@@ -80,7 +80,7 @@ module sd_bmp_reader #(
     reg  en_s1, en_s2;
     reg  [7:0] ix_s1, ix_s2;
     reg  sdi_s1, sdi_s2;
-    reg  [8:0] fu_s1, fu_s2;
+    reg  [9:0] fu_s1, fu_s2;
     reg        sp_s1, sp_s2;
 
     always @(posedge clk or posedge rst) begin
@@ -88,7 +88,7 @@ module sd_bmp_reader #(
             en_s1  <= 1'b0;  en_s2  <= 1'b0;
             ix_s1  <= 8'd0;  ix_s2  <= 8'd0;
             sdi_s1 <= 1'b0;  sdi_s2 <= 1'b0;
-            fu_s1  <= 9'd0;  fu_s2  <= 9'd0;
+            fu_s1  <= 10'd0; fu_s2  <= 10'd0;
             sp_s1  <= 1'b0;  sp_s2  <= 1'b0;
         end else begin
             en_s1  <= enable;
@@ -152,7 +152,7 @@ module sd_bmp_reader #(
                     // 电平启动 + started 防重复。
                     // 另外必须先看水位：清屏刚结束时 FIFO 可能还是满的，
                     // 这时开读一整个扇区（128 字）会全被丢掉。
-                    if (en_s2 && sdi_s2 && !started && (fu_s2 < 9'd48)) begin
+                    if (en_s2 && sdi_s2 && !started && (fu_s2 < 10'd32)) begin
                         base_sec <= img_base;
                         sec_cnt  <= 16'd0;
                         word_cnt <= 9'd0;
@@ -200,7 +200,7 @@ module sd_bmp_reader #(
                         //   48 + 128 = 176，再留 80 字给 sfifo 里的残余字节，
                         // 保证整个加载过程 FIFO 永远到不了 256（满了就会丢像素，
                         // 丢像素会让 4 字 burst 的地址断掉 -> 图像错位）。
-                        end else if (fu_s2 < 9'd48) begin
+                        end else if (fu_s2 < 10'd32) begin
                             sec_cnt  <= sec_cnt + 16'd1;
                             word_cnt <= 9'd0;
                             st       <= S_CMD;

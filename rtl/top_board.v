@@ -192,7 +192,7 @@ module top_board #(
     // ------------------------------------------------------------------
     wire [15:0] fb_rgb;
     wire        fb_de, fb_rdy;
-    wire [8:0]  fb_wf_used;
+    wire [9:0]  fb_wf_used;
     wire        fb_wr_idle;
 
     reg         load_mode;
@@ -249,6 +249,7 @@ module top_board #(
         .wr_bank (wr_bank),
         .wr_fifo_used(fb_wf_used),
         .wr_idle (fb_wr_idle),
+        .wr_drop (fb_wr_drop),
         .rgb_out (fb_rgb),
         .de_out  (fb_de)
     );
@@ -562,10 +563,20 @@ module top_board #(
     // ------------------------------------------------------------------
     // 画面 + 菜单
     // ------------------------------------------------------------------
+    // 丢像素计数（饱和到 4 位）：SHOW 态显示在数码管低半字节，
+    // 用来判断黑线是不是"写 FIFO 满丢像素"造成的。每换一张图清零。
+    reg [3:0] drop_cnt;
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n)                    drop_cnt <= 4'd0;
+        else if (sc_clr)               drop_cnt <= 4'd0;
+        else if (fb_wr_drop && drop_cnt != 4'd15) drop_cnt <= drop_cnt + 4'd1;
+    end
+
     // 数码管调试字：[7:6]img_idx[1:0] [5]rd_bank [4]wr_bank
-    //                [3:1]ld_st [0]sd_ready
+    //   低半字节：SHOW 态显示丢字计数（正常应为 0）；其它态显示 {ld_st, sd_ready}
     //   ld_st: 0=WAIT 1=CLEAR 2=ARM 3=LOAD 4=SHOW
-    wire [7:0]  dbg_ext = {img_idx[1:0], rd_bank, wr_bank, ld_st, sd_ready};
+    wire [3:0] dbg_lo = (ld_st == LD_SHOW) ? drop_cnt : {ld_st, sd_ready};
+    wire [7:0]  dbg_ext = {img_idx[1:0], rd_bank, wr_bank, dbg_lo};
 
     wire        menu_open;
     wire [2:0]  dbg_item;

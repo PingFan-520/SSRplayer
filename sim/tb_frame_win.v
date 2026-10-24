@@ -341,22 +341,6 @@ module tb_frame_win;
     always @(posedge pix_clk) if (u_fb.rf_rd) c_rfrd = c_rfrd + 1;
 
     // ---------------- 抓帧 ----------------
-    integer c_tk2 = 0, c_dp2 = 0, c_bs2 = 0, c_dshow = 0, c_bz = 0, c_rf = 0;
-    always @(posedge mem_clk) begin
-        if (u_fb.wd_take) c_tk2 = c_tk2 + 1;
-        if (u_fb.wd_drop) begin
-            c_dp2 = c_dp2 + 1;
-            if (c_dshow < 10) begin
-                c_dshow = c_dshow + 1;
-                $display("[drp] y=%0d xw=%0d bn=%0d b_xw=%0d b_y=%0d bgap=%0d bsend=%0d",
-                         u_fb.wd_y, u_fb.wd_xw, u_fb.bn, u_fb.b_xw, u_fb.b_y, u_fb.bgap, u_fb.bsend);
-            end
-        end
-        if (u_fb.bsend && (u_fb.bi == 2'd0)) c_bs2 = c_bs2 + 1;
-        if (u_fb.bsend && u_fb.app_busy)    c_bz = c_bz + 1;
-        if (u_fb.bsend && u_fb.app_ref_vld) c_rf = c_rf + 1;
-    end
-
     reg [15:0] frame_buf [0:FW*FH-1];
     integer wp = 0;
     always @(posedge pix_clk) begin
@@ -406,7 +390,7 @@ module tb_frame_win;
         repeat (200) @(posedge pix_clk);
 
         // 写 640x480 图案到 (320,120)
-        load_mode = 1'b0;   // 实验：只写消隐期（双缓冲的节流模式）
+        load_mode = 1'b0;          // 实验：只写消隐期（双缓冲节流模式）
         $display("[tb] writing 640x480 pattern...");
         for (wyy = 0; wyy < 480; wyy = wyy + 1) begin
             for (wxx = 0; wxx < 640; wxx = wxx + 1) begin
@@ -424,7 +408,6 @@ module tb_frame_win;
                     wr_pix_rgb = {wxx[7:3], wyy[7:2], 5'b00000};
                 @(negedge pix_clk);        // 单拍脉冲：每像素只写一次
                 wr_pix_en = 1'b0;
-                repeat (6) @(negedge pix_clk);   // 模拟真实源速率（SD 约 36 拍/像素）
             end
         end
         @(negedge pix_clk);
@@ -490,21 +473,6 @@ module tb_frame_win;
             end
         end
         $display("[res] SDRAM content match : %0d/%0d wrong", wbad, 153600);
-        $display("[dbg] take=%0d drop=%0d burst=%0d busyInBurst=%0d refInBurst=%0d", c_tk2, c_dp2, c_bs2, c_bz, c_rf);
-        for (k = 150; k < 165; k = k + 1) begin
-            cnt_w = 0;
-            for (i = 0; i < 320; i = i + 1) begin
-                g6v = (k & 255) >> 2;
-                r5v = ((i*2) & 255) >> 3;
-                b5v = ((((i*2) >> 5) + (k >> 5)) & 1) ? 5'd31 : 5'd0;
-                p0  = {r5v, g6v, b5v};
-                r5v = ((i*2+1) & 255) >> 3;
-                b5v = ((((i*2+1) >> 5) + (k >> 5)) & 1) ? 5'd31 : 5'd0;
-                p1  = {r5v, g6v, b5v};
-                if (u_chip.Bank0[k*320 + i] !== {p1,p0}) cnt_w = cnt_w + 1;
-            end
-            $display("[rowbad] %0d : %0d/320", k, cnt_w);
-        end
 
         // 逐行统计：y=120..135 每行有多少字落盘（每行 320 字，索引 y*640+160..+479）
         for (k = 0; k < 16; k = k + 1) begin
