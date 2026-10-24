@@ -259,7 +259,9 @@ module top_osd_demo #(
     seg7 #(.CLK_HZ(KEY_CLK_HZ)) u_seg (
         .clk     (clk),
         .rst_n   (rst_n),
-        .value   ({8'd0, 8'd0, dbg_ext}),      // 低 2 位 = SD/轮播状态字
+        // seg7 的 dsel=0 对应最左边一位，而它是 value[3:0]，
+        // 直接接 dbg_ext 会显示成左右颠倒（05 显示成 50），这里交换高低半字节
+        .value   ({8'd0, 8'd0, dbg_ext[3:0], dbg_ext[7:4]}),
         .dp_mask ({menu_open, 5'b00000}),
         .seg_sel (seg_sel),
         .seg_data(seg_data)

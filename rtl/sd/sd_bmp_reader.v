@@ -61,22 +61,32 @@ module sd_bmp_reader #(
     // 控制信号来自像素域（37.5MHz），这里是 25MHz，必须同步 / 取边沿
     // ------------------------------------------------------------------
     reg  st_s1, st_s2, st_s3;
+    reg  sdi_s1, sdi_s2;
     reg  [7:0] ix_s1, ix_s2;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             st_s1 <= 1'b0; st_s2 <= 1'b0; st_s3 <= 1'b0;
+            sdi_s1 <= 1'b0; sdi_s2 <= 1'b0;
             ix_s1 <= 8'd0; ix_s2 <= 8'd0;
         end else begin
             st_s1 <= start;
             st_s2 <= st_s1;
             st_s3 <= st_s2;
+            sdi_s1 <= sd_init_done;
+            sdi_s2 <= sdi_s1;
             ix_s1 <= img_idx;      // 上层换图后会先等 16 拍，这里再打两拍
             ix_s2 <= ix_s1;
         end
     end
 
-    wire start_p = st_s2 & ~st_s3;          // 上升沿单拍，避免电平保持导致重复启动
+    // 电平启动，不用边沿：
+    //   start 是像素域电平，上层一直保持到 busy 拉高才撤。
+    //   用边沿只有一次机会，只要那一拍 sd_init_done 还没同步过来就永久错过，
+    //   表现就是 busy 永远是 0、load_mode 永远卡在 1（上板实测 05）。
+    wire start_lvl = st_s2;
+    wire sdi_ok    = sdi_s2;
+    wire start_p   = st_s2 & ~st_s3;        // 仅留作观测
 
     // 每张图的起始扇区 = SEC_BASE + img_idx * SEC_STRIDE
     wire [31:0] img_base = SEC_BASE + ix_s2 * SEC_STRIDE;
@@ -116,7 +126,7 @@ module sd_bmp_reader #(
 
             case (st)
                 S_IDLE: begin
-                    if (start_p && sd_init_done) begin
+                    if (start_lvl && sdi_ok) begin
                         base_sec <= img_base;
                         sec_cnt  <= 16'd0;
                         word_cnt <= 9'd0;
