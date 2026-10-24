@@ -275,8 +275,11 @@ module frame_buffer #(
     wire [31:0] rf_dout;
 
     // 2026-10-24：深度 1024 -> 2048 字，并改用 FIFO 自己的 wr_used 做限流。
-    wire [12:0] rf_used;
-    afifo #(.DW(32), .AW(12)) u_rfifo (
+    // 深度 4096 -> 2048：4096 要 15 块 M9K，布局时把 u_rfifo 挤到布线拥塞，
+    // phy 直接报 "Incremental route failed"。2048 只占 7 块，
+    // 6.3 行缓冲在 wr_used 精确限流下足够（之前的失败是 fcnt 漂移，不是深度）。
+    wire [11:0] rf_used;
+    afifo #(.DW(32), .AW(11)) u_rfifo (
         .clk_w(clk_mem), .clk_r(pix_clk), .aclr(wr_win_m | pix_rst),
         .wr_en(rf_wr), .wr_data(rd_cap), .wr_full(rf_full),
         .rd_en(rf_rd), .rd_data(rf_dout), .rd_empty(rf_empty),
@@ -306,7 +309,7 @@ module frame_buffer #(
     //   于是读侧长期停在"以为满了"的状态，FIFO 却是空的 —— 图像只剩 1.4%。
     // ==================================================================
     // TB 仍按旧名字观测
-    wire [12:0] fcnt = rf_used;
+    wire [11:0] fcnt = rf_used;
 
 
     // 只靠 FIFO 的 full 做保护：实测加任何额外水位限流都会让读"读4字就停"，
@@ -315,7 +318,7 @@ module frame_buffer #(
     // used 依赖 outst、outst 又依赖 rd_go/rstart，形成组合环，不能这么写。
     // fcnt 现在是准的（单拍计数），阈值留 16 字余量给 burst 在途数据。
     wire       rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                        (rf_used < 13'd4080) & ~rf_full & ~rburst & (rgap == 4'd0);
+                        (rf_used < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0);
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin

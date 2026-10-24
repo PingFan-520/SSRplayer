@@ -199,7 +199,10 @@ module bmp_decode #(
                     end
                 end
                 // ----------------------------------------------
-                S_DONE: ;
+                // 原来这里是空语句，解码完一张就永久停住，
+                // 第二张及以后的数据全被丢弃（上板表现为只播第一张）。
+                // 回到 S_HDR 继续找下一个 'BM'；多余字节没有 BM 头会被忽略。
+                S_DONE: state <= S_HDR;
                 S_BAD:  ;
                 default: state <= S_HDR;
                 endcase

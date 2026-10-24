@@ -312,10 +312,26 @@ module top_board #(
 
     // ------------------------------------------------------------------
     // BMP 解码（像素域）
+    //   每次开始装载时给一个复位脉冲：reader 每张读 1801 扇区(922112B)，
+    //   而 BMP 只有 921654B，多出的 458 字节没有 BM 头，
+    //   不复位的话残留状态会把下一张的头部吃掉。
     // ------------------------------------------------------------------
+    reg rd_en_d, bmp_rst;
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_en_d <= 1'b0;
+            bmp_rst <= 1'b1;
+        end else begin
+            rd_en_d <= rd_en;
+            bmp_rst <= 1'b0;
+            if (rd_en & ~rd_en_d) bmp_rst <= 1'b1;   // rd_en 上升沿 = 新一张开始
+        end
+    end
+
     bmp_decode u_bmp (
         .clk        (clk_pix),
-        .rst        (~rst_n),
+        .rst        (~rst_n | bmp_rst),
         .s_data     (sfifo_dout),
         .s_valid    (sfifo_rvld),
         .s_ready    (),
@@ -428,14 +444,10 @@ module top_board #(
     // ------------------------------------------------------------------
     // 画面 + 菜单
     // ------------------------------------------------------------------
-    // 数码管调试字（低字节）：
-    //   [6]   done_p (reader 读完)
-    //   [5:4] ld_st  0=WAIT 1=ARM 2=LOAD 3=SHOW
-    //   [3]   rd_en
-    //   [2]   load_mode
-    //   [1]   rdr_busy
-    //   [0]   sd_ready
-    wire [7:0]  dbg_ext = {1'b0, rdr_done_p, ld_st, rd_en, load_mode, rdr_busy, sd_ready};
+    // 数码管调试字（**要把数码管读数反过来拼**）：
+    //   高半字节 = {img_idx[2:0], rdr_busy}   低半字节 = {ld_st, rd_en, sd_ready}
+    //   ld_st: 0=WAIT 1=ARM 2=LOAD 3=SHOW
+    wire [7:0]  dbg_ext = {img_idx[2:0], rdr_busy, ld_st, rd_en, sd_ready};
 
     wire        menu_open;
     wire [2:0]  dbg_item;
