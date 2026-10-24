@@ -32,6 +32,7 @@ SOURCES = [
     "rtl/video/rgb2axis.v",
     "rtl/video/bmp_decode.v",
     "rtl/video/pattern_src.v",
+    "rtl/audio/tone_gen.v",
     "rtl/sd/sd_init.v",
     "rtl/sd/sd_read.v",
     "rtl/sd/sd_ctrl_top.v",

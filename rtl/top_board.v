@@ -503,6 +503,23 @@ module top_board #(
         end
     end
 
+    // ------------------------------------------------------------------
+    // HDMI 音频：DDS 单音，音高跟随当前图片编号（换图变调 = 音视频联动）
+    //   48kHz 采样，ACR: N=6144, CTS = 37.5MHz*6144/(128*48000) = 37500
+    // ------------------------------------------------------------------
+    wire        aud_valid;
+    wire [23:0] aud_left, aud_right;
+
+    tone_gen #(.CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)) u_tone (
+        .clk       (clk_pix),
+        .rst       (~rst_n),
+        .note_idx  (img_idx),
+        .mute      (1'b0),
+        .aud_valid (aud_valid),
+        .aud_left  (aud_left),
+        .aud_right (aud_right)
+    );
+
     wire [9:0] tmds_ch0, tmds_ch1, tmds_ch2, tmds_clk;
 
     hdmi_1_4b_transmitter_core_wrapper #(
@@ -535,12 +552,12 @@ module top_board #(
         .I_axis_s_data     (axis_data),
         .O_axis_s_ready    (),
 
-        .I_audio_valid     (1'b0),
-        .I_audio_left_data (24'd0),
-        .I_audio_right_data(24'd0),
-        .I_acr_valid       (1'b0),
-        .I_acr_cts         (20'd0),
-        .I_acr_n           (20'd0),
+        .I_audio_valid     (aud_valid),
+        .I_audio_left_data (aud_left),
+        .I_audio_right_data(aud_right),
+        .I_acr_valid       (1'b1),
+        .I_acr_cts         (20'd37500),
+        .I_acr_n           (20'd6144),
 
         .O_video_locked    (),
         .O_ddc_scl         (HDMI_DDC_SCL),
