@@ -192,7 +192,7 @@ module top_board #(
     // ------------------------------------------------------------------
     wire [15:0] fb_rgb;
     wire        fb_de, fb_rdy;
-    wire [9:0]  fb_wf_used;
+    wire [8:0]  fb_wf_used;
     wire        fb_wr_idle;
 
     reg         load_mode;

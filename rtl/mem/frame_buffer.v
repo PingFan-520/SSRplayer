@@ -71,7 +71,7 @@ module frame_buffer #(
     input  wire        wr_bank,        // 写缓冲：另一块
     // 9 位：afifo 的 wr_used 是 [AW:0]，满的时候等于 256。
     // 曾经截成 8 位 -> 满时变 0 -> SD 读到"空"，像素全丢、整张图写不进去。
-    output wire [9:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
+    output wire [8:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
     output wire        wr_idle,        // 写侧彻底排空（FIFO 空 + 无在途 burst）
     output wire        wr_drop,        // 本拍有像素因写 FIFO 满而丢失（诊断用）
     output wire [15:0] rgb_out,
@@ -124,11 +124,11 @@ module frame_buffer #(
     assign wf_wr   = pair_now && ~wf_full;
     assign wf_data = {wr_buf, wr_y, wr_x[11:1], prgb, wr_rgb};
 
-    wire [9:0] wf_used;
+    wire [8:0] wf_used;
 
-    // 深度 256 -> 512：双缓冲下写只发生在消隐期，256 字（3.5 行）余量偏紧，
-    // 任何一点反压延迟都会让 FIFO 满 -> 像素被丢 -> 图像出现黑色短横线。
-    afifo #(.DW(56), .AW(9)) u_wfifo (
+    // 深度保持 256：曾试过 512，多占 2 块 M9K 后布局变化导致画面整体错位，
+    // 已回退（BRAM 余量比 FIFO 深度更重要）。
+    afifo #(.DW(56), .AW(8)) u_wfifo (
         .clk_w(pix_clk), .clk_r(clk_mem), .aclr(pix_rst),
         .wr_en(wf_wr), .wr_data(wf_data), .wr_full(wf_full),
         .rd_en(wf_rd), .rd_data(wf_dout), .rd_empty(wf_empty),
