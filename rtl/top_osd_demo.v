@@ -53,7 +53,8 @@ module top_osd_demo #(
     input  wire [15:0] ext_rgb,      // 外部视频（RGB565，黑边=0）
     output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
     output wire [11:0] raw_x,
-    output wire [11:0] raw_y         // 帧内行号 0..VTOTAL-1
+    output wire [11:0] raw_y,        // 帧内行号 0..VTOTAL-1
+    input  wire [7:0]  dbg_ext       // 调试字（SD/轮播状态），显示在数码管
 );
 
     wire rst = ~rst_n;
@@ -258,7 +259,7 @@ module top_osd_demo #(
     seg7 #(.CLK_HZ(KEY_CLK_HZ)) u_seg (
         .clk     (clk),
         .rst_n   (rst_n),
-        .value   ({13'd0, dbg_item, cfg_ver, dbg_val}),
+        .value   ({8'd0, 8'd0, dbg_ext}),      // 低 2 位 = SD/轮播状态字
         .dp_mask ({menu_open, 5'b00000}),
         .seg_sel (seg_sel),
         .seg_data(seg_data)

@@ -51,7 +51,8 @@ module tb_osd_demo;
         .dbg_prog(pg), .dbg_effect(ef),
         .seg_sel(ss), .seg_data(sd),
         .ext_rgb(16'd0),
-        .raw_de(), .raw_x(), .raw_y()
+        .raw_de(), .raw_x(), .raw_y(),
+        .dbg_ext(8'd0)
     );
 
     // ------------------------------------------------------------------

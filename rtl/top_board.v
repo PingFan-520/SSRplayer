@@ -424,6 +424,9 @@ module top_board #(
     // ------------------------------------------------------------------
     // 画面 + 菜单
     // ------------------------------------------------------------------
+    // 数码管调试字：{[7:4] img_idx, [3] 保留, [2] load_mode, [1] rdr_busy, [0] sd_ready}
+    wire [7:0]  dbg_ext = {img_idx[3:0], 1'b0, load_mode, rdr_busy, sd_ready};
+
     wire        menu_open;
     wire [2:0]  dbg_item;
     wire [3:0]  dbg_val;
@@ -446,7 +449,8 @@ module top_board #(
         .dbg_prog(dbg_prog), .dbg_effect(dbg_effect),
         .seg_sel(seg_sel), .seg_data(seg_data),
         .ext_rgb(fb_rgb),
-        .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y)
+        .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
+        .dbg_ext(dbg_ext)
     );
 
     // ------------------------------------------------------------------
