@@ -2,24 +2,27 @@
 //  top_board.v —— 上板顶层（康芯 HX4S20 / EG4S20BG256）
 //
 //  链路：
-//    50MHz -> PLL(37.5 / 187.5MHz)
-//          -> color_bar + pattern_b + transition + param + menu（top_osd_demo）
-//          -> rgb2axis -> HDMI 1.4b core -> phy -> HDMI 接口
+//    SD 卡(SPI,25MHz) -> sd_ctrl_top -> sd_bmp_reader -> 异步FIFO
+//       -> bmp_decode(RGB565+屏幕坐标) -> frame_buffer -> SDRAM
+//       -> 显示侧读出 -> top_osd_demo(转场/菜单) -> rgb2axis -> HDMI
 //
-//  为什么是 37.5MHz（720p30 / CEA VIC 4）：
-//    SDRAM 控制器实测读带宽只有 7.51M 字/s，而 720p60 下显示 640x480 图片
-//    行内瞬时需求是 640px/22.2us = 14.4M 字/s —— 差一半，FIFO 6 行就耗空，
-//    图像每 32 像素错 6 个（81% 正确率）。把像素时钟减半后行时间变成 44.4us，
-//    需求降到 7.2M，再配合 frame_buffer 的 16 字长 burst，才真正有余量。
-//    H/V 时序参数一个字都没改（仍是 1650x750），只是时钟减半 -> 30Hz。
-//    如果显示器不认 30Hz：把 CLKC0_DIV 改回 10、CLKC1_DIV 改回 2、
-//    VIDEO_VIC 改回 16 即回到 720p60（带宽不足，图片会错位但能出图）。
+//  时钟（PLL，VCO=750MHz）：
+//    CLKC0 = 37.5MHz  像素域（720p30 / CEA VIC 4）
+//    CLKC1 = 187.5MHz HDMI 串行（5x 像素）
+//    CLKC2 = 125MHz   SDRAM 控制器
+//    CLKC3 = 125MHz   SDRAM 移相（CPHASE 差 3 个 VCO = 4ns = 半周期）
+//    CLKC4 = 25MHz    SD SPI
 //
-//  按键（均为低有效，板上 KEY1~KEY4）：
-//    KEY1(A2) = MENU 开合        KEY3(B1) = UP
-//    KEY4(B2) = DOWN             KEY2(C1) = OK
+//  为什么是 37.5MHz 而不是 75MHz：
+//    SDRAM 控制器实测读带宽 7.5M 字/s，而 640x480 图片在 720p60 下
+//    行内需求是 640px/22.2us = 14.4M 字/s —— 差一半，FIFO 几行就耗空。
+//    像素时钟减半后行时间 44.4us、需求 7.2M；再加上读 FIFO 4096 深，
+//    仿真与上板都是逐像素 0 误差。
+//    H/V 参数没变（1650x750），只是时钟减半 -> 30Hz。
+//    回退 60Hz：CLKC0_DIV=10、CLKC1_DIV=2、VIDEO_VIC=16。
 //
-//  复位：不再占用按键，改为 PLL 锁定 + 上电计数释放。
+//  按键（低有效）：KEY1(A2)=MENU  KEY3(B1)=UP  KEY4(B2)=DOWN  KEY2(C1)=OK
+//  复位：PLL 锁定 + 上电计数释放。
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -33,7 +36,12 @@ module top_board #(
     parameter integer VTOTAL  = 750,
     parameter integer VSA     = 5,
     parameter integer VBP     = 20,
-    parameter integer VFP     = 5
+    parameter integer VFP     = 5,
+    // SD 卡上的图片布局（裸扇区，PC 端用 tools/make_sd_image.py 生成镜像）
+    parameter integer SEC_BASE   = 2048,      // 第 0 张图起始扇区（1MB 偏移）
+    parameter integer SEC_STRIDE = 1801,      // 每张图占 1801 扇区（=921654 字节）
+    parameter integer IMG_NUM    = 6,         // 循环张数
+    parameter integer HOLD_FRM   = 90         // 每张停留帧数（30fps 下 3 秒）
 )(
     input  wire        clk_50m,       // R7
 
@@ -41,6 +49,12 @@ module top_board #(
     input  wire        key2,          // C1  OK
     input  wire        key3,          // B1  UP
     input  wire        key4,          // B2  DOWN
+
+    // SD 卡（SPI 模式）
+    output wire        sd_clk,        // A14
+    output wire        sd_cs,         // A12
+    input  wire        sd_miso,       // B14
+    output wire        sd_mosi,       // A13
 
     output wire        HDMI_CLK_P,
     output wire        HDMI_D0_P,
@@ -54,13 +68,9 @@ module top_board #(
 );
 
     // ------------------------------------------------------------------
-    // PLL：50MHz -> 37.5MHz 像素 / 187.5MHz 串行 / 125MHz+125MHz(移相) SDRAM
-    //   VCO = 50 x 15 = 750MHz
-    //   CLKC0 = 750/20 = 37.5MHz      CLKC1 = 750/4  = 187.5MHz
-    //   CLKC2 = 750/6  = 125MHz       CLKC3 = 750/6  = 125MHz（CPHASE 差 3
-    //   个 VCO = 4ns = 半个周期，对应参考工程的 Clk_sft）
+    // PLL：5 路输出
     // ------------------------------------------------------------------
-    wire clk_pix, clk_ser, clk_mem, clk_mem_sft, pll_lock;
+    wire clk_pix, clk_ser, clk_mem, clk_mem_sft, clk_sd, pll_lock;
 
     EG_PHY_PLL #(
         .DPHASE_SOURCE  ("DISABLE"),
@@ -93,7 +103,11 @@ module top_board #(
         .CLKC3_ENABLE   ("ENABLE"),
         .CLKC3_DIV      (6),
         .CLKC3_CPHASE   (2),
-        .CLKC3_FPHASE   (0)
+        .CLKC3_FPHASE   (0),
+        .CLKC4_ENABLE   ("ENABLE"),
+        .CLKC4_DIV      (30),
+        .CLKC4_CPHASE   (29),
+        .CLKC4_FPHASE   (0)
     ) u_pll (
         .refclk     (clk_50m),
         .reset      (1'b0),
@@ -112,11 +126,11 @@ module top_board #(
         .daddr      (6'h00),
         .do         (),
         .fbclk      (1'b0),
-        .clkc       ({open, clk_mem_sft, clk_mem, clk_ser, clk_pix})
+        .clkc       ({clk_sd, clk_mem_sft, clk_mem, clk_ser, clk_pix})
     );
 
     // ------------------------------------------------------------------
-    // 复位：PLL 锁定后释放；再等 2^20 拍让内部状态稳定
+    // 复位
     // ------------------------------------------------------------------
     reg [19:0] por_cnt;
     reg        rst_n;
@@ -134,7 +148,7 @@ module top_board #(
     end
 
     // ------------------------------------------------------------------
-    // 统一声明（跨模块互连，避免使用前未声明）
+    // 统一声明
     // ------------------------------------------------------------------
     wire [23:0] rgb;
     wire        hs, vs, de;
@@ -143,13 +157,8 @@ module top_board #(
     wire        raw_de;
     wire [11:0] raw_x, raw_y;
 
-    wire        pat_en, pat_run;
-    wire [11:0] pat_x, pat_y;
-    wire [15:0] pat_rgb;
-    wire        pat_done;
-
     // ------------------------------------------------------------------
-    // SDRAM（封装内 SIP，厂商控制器）
+    // SDRAM
     // ------------------------------------------------------------------
     wire        sdr_init_done, sdr_ref_vld, sdr_busy, sdr_rd_valid;
     wire [31:0] sdr_rd_dout;
@@ -179,12 +188,17 @@ module top_board #(
     );
 
     // ------------------------------------------------------------------
-    // 帧缓存：只存 640x480 的图片区，黑边不进 SDRAM
+    // 帧缓存
     // ------------------------------------------------------------------
     wire [15:0] fb_rgb;
     wire        fb_de, fb_rdy;
 
     reg         load_mode;
+
+    // 写侧数据源（BMP 解码器输出）
+    wire        bmp_we;
+    wire [11:0] bmp_x, bmp_y;
+    wire [15:0] bmp_rgb;
 
     frame_buffer #(
         .FB_W(1280), .FB_H(720), .VACTIVE(720),
@@ -207,10 +221,10 @@ module top_board #(
 
         .pix_clk (clk_pix),
         .pix_rst (~rst_n),
-        .wr_en   (pat_en),
-        .wr_x    (pat_x),
-        .wr_y    (pat_y),
-        .wr_rgb  (pat_rgb),
+        .wr_en   (bmp_we),
+        .wr_x    (bmp_x),
+        .wr_y    (bmp_y),
+        .wr_rgb  (bmp_rgb),
         .wr_buf  (1'b0),
         .wr_ready(fb_rdy),
 
@@ -225,46 +239,185 @@ module top_board #(
     );
 
     // ------------------------------------------------------------------
-    // 图案源：上电写一帧 640x480 彩条网格进 SDRAM
-    //   （接上 SD 卡后这一段会换成 bmp_decode 的输出）
+    // SD 卡：SPI 控制器（25MHz）
     // ------------------------------------------------------------------
-    reg [3:0] st_cnt;
-    always @(posedge clk_pix or negedge rst_n) begin
-        if (!rst_n) st_cnt <= 4'd0;
-        else if (st_cnt != 4'hF) st_cnt <= st_cnt + 4'd1;
-    end
-    wire pat_start = (st_cnt == 4'hE);
+    wire        sd_init_done, sd_rd_busy, sd_rd_val_en, sd_rd_start_en;
+    wire [31:0] sd_rd_sec_addr;
+    wire [15:0] sd_rd_val_data;
 
-    pattern_src #(
-        .IMG_W(640), .IMG_H(480), .X0(320), .Y0(120)
-    ) u_pat (
-        .clk(clk_pix), .rst(~rst_n),
-        .start(pat_start), .ready(fb_rdy),
-        .en(pat_en), .x(pat_x), .y(pat_y), .rgb(pat_rgb),
-        .run(pat_run), .done(pat_done)
+    sd_ctrl_top u_sd (
+        .clk_ref      (clk_sd),
+        .rst_n        (rst_n),
+
+        .sd_miso      (sd_miso),
+        .sd_clk       (sd_clk),
+        .sd_cs        (sd_cs),
+        .sd_mosi      (sd_mosi),
+
+        .rd_start_en  (sd_rd_start_en),
+        .rd_sec_addr  (sd_rd_sec_addr),
+        .rd_busy      (sd_rd_busy),
+        .rd_val_en    (sd_rd_val_en),
+        .rd_val_data  (sd_rd_val_data),
+
+        .sd_init_done (sd_init_done)
     );
 
-    // 加载结束后等写 FIFO / SDRAM burst 收尾，再切到"边读边显示"。
-    // 注意：这里不能用层次引用（如 u_fb.wf_empty）——TD 综合器报
-    //   "external connection to net ... is not allowed"。
-    // 而且 wf_empty 属于 mem 时钟域，拿到 pix 域用也不安全。
-    // 改用 wr_ready（pix 域，= ~wf_full）：只要它连续 4000 拍（≈107us）不拉低，
-    // 就说明 128 深的写 FIFO 已经排空、SDRAM 最后一组 burst 也发完了。
-    reg        pat_done_d;
-    reg [12:0] ld_dly;
+    // ------------------------------------------------------------------
+    // 扇区连续读 + 字节流
+    // ------------------------------------------------------------------
+    wire [7:0] sd_byte;
+    wire       sd_byte_vld;
+    wire       rdr_busy;
+
+    reg  [7:0] img_idx;
+    reg        start_req;          // pix 域电平请求（SD 域取上升沿启动）
+
+    sd_bmp_reader #(
+        .SEC_BASE(SEC_BASE), .SEC_STRIDE(SEC_STRIDE), .SEC_NUM(SEC_STRIDE)
+    ) u_rdr (
+        .clk          (clk_sd),
+        .rst          (~rst_n),
+
+        .rd_start_en  (sd_rd_start_en),
+        .rd_sec_addr  (sd_rd_sec_addr),
+        .rd_busy      (sd_rd_busy),
+        .rd_val_en    (sd_rd_val_en),
+        .rd_val_data  (sd_rd_val_data),
+        .sd_init_done (sd_init_done),
+
+        .start        (start_req),
+        .img_idx      (img_idx),
+        .busy         (rdr_busy),
+        .done         (),
+
+        .byte_data    (sd_byte),
+        .byte_valid   (sd_byte_vld)
+    );
+
+    // 字节流跨到像素域
+    wire [7:0] sfifo_dout;
+    wire       sfifo_empty, sfifo_rvld, sfifo_rd;
+
+    afifo #(.DW(8), .AW(9)) u_sfifo (
+        .clk_w(clk_sd), .clk_r(clk_pix), .aclr(~rst_n),
+        .wr_en(sd_byte_vld), .wr_data(sd_byte), .wr_full(),
+        .rd_en(sfifo_rd), .rd_data(sfifo_dout), .rd_empty(sfifo_empty),
+        .rd_valid(sfifo_rvld), .wr_used()
+    );
+
+    // afifo 是寄存器输出：读一次出一拍，rd_valid 期间不再读
+    assign sfifo_rd = ~sfifo_empty & ~sfifo_rvld;
+
+    // ------------------------------------------------------------------
+    // BMP 解码（像素域）
+    // ------------------------------------------------------------------
+    bmp_decode u_bmp (
+        .clk        (clk_pix),
+        .rst        (~rst_n),
+        .s_data     (sfifo_dout),
+        .s_valid    (sfifo_rvld),
+        .s_ready    (),
+        .o_we       (bmp_we),
+        .o_x        (bmp_x),
+        .o_y        (bmp_y),
+        .o_rgb565   (bmp_rgb),
+        .o_frame_done(),
+        .o_img_w    (),
+        .o_img_h    (),
+        .o_hdr_ok   ()
+    );
+
+    // ------------------------------------------------------------------
+    // 轮播状态机（像素域）
+    //   WAIT : 等 SD 初始化完成
+    //   LOAD : load_mode=1，整帧只写不读；启动一次扇区读
+    //   SHOW : load_mode=0，正常显示；停留 HOLD_FRM 帧后换下一张
+    // ------------------------------------------------------------------
+    localparam [1:0] LD_WAIT = 2'd0,
+                     LD_ARM  = 2'd1,      // 换图后先让 img_idx 稳定
+                     LD_LOAD = 2'd2,
+                     LD_SHOW = 2'd3;
+
+    reg [1:0]  ld_st;
+    reg [12:0] fin_dly;
+    reg [15:0] hold_frm;
+    reg        busy_d;
+    reg [1:0]  sdi_sync, rbsy_sync;
+
+    wire sd_ready   = sdi_sync[1];
+    wire rdr_busy_p = rbsy_sync[1];
+    wire frame_top  = (raw_y == 12'd0) && (raw_x == 12'd0);
 
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
-            pat_done_d <= 1'b0;
-            ld_dly     <= 13'd0;
-            load_mode  <= 1'b1;
+            sdi_sync  <= 2'b00;
+            rbsy_sync <= 2'b00;
+            busy_d    <= 1'b0;
         end else begin
-            pat_done_d <= pat_done;
-            if (load_mode && pat_done_d) begin
-                if (!fb_rdy)                  ld_dly <= 13'd0;   // FIFO 又满了，重新等
-                else if (ld_dly == 13'd4000)  load_mode <= 1'b0;
-                else                          ld_dly <= ld_dly + 13'd1;
-            end
+            sdi_sync  <= {sdi_sync[0],  sd_init_done};
+            rbsy_sync <= {rbsy_sync[0], rdr_busy};
+            busy_d    <= rdr_busy_p;
+        end
+    end
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin
+            ld_st     <= LD_WAIT;
+            img_idx   <= 8'd0;
+            start_req <= 1'b0;
+            load_mode <= 1'b1;
+            fin_dly   <= 13'd0;
+            hold_frm  <= 16'd0;
+        end else begin
+            case (ld_st)
+                LD_WAIT: begin
+                    if (sd_ready) begin
+                        ld_st     <= LD_LOAD;
+                        start_req <= 1'b1;
+                        fin_dly   <= 13'd0;
+                    end
+                end
+
+                // img_idx 是像素域的寄存器，SD 域要用它算起始扇区，
+                // 换图后先等 16 拍（~427ns，远大于 2 个 25MHz 周期）再发请求，
+                // 避免多比特总线正在变化时被采样。
+                LD_ARM: begin
+                    if (fin_dly == 13'd16) begin
+                        start_req <= 1'b1;
+                        fin_dly   <= 13'd0;
+                        ld_st     <= LD_LOAD;
+                    end else begin
+                        fin_dly <= fin_dly + 13'd1;
+                    end
+                end
+
+                LD_LOAD: begin
+                    load_mode <= 1'b1;
+                    if (rdr_busy_p) start_req <= 1'b0;   // 已启动，撤请求
+                    if (busy_d && !rdr_busy_p) begin      // busy 下降沿 = 读完
+                        if (fin_dly == 13'd4000) begin
+                            load_mode <= 1'b0;
+                            hold_frm  <= 16'd0;
+                            ld_st     <= LD_SHOW;
+                        end else begin
+                            fin_dly <= fin_dly + 13'd1;
+                        end
+                    end
+                end
+
+                LD_SHOW: begin
+                    if (frame_top) hold_frm <= hold_frm + 16'd1;
+                    if (hold_frm >= HOLD_FRM[15:0]) begin
+                        img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
+                                                                     : (img_idx + 8'd1);
+                        fin_dly   <= 13'd0;
+                        ld_st     <= LD_ARM;
+                    end
+                end
+
+                default: ld_st <= LD_WAIT;
+            endcase
         end
     end
 
@@ -281,7 +434,7 @@ module top_board #(
         .HACTIVE(HACTIVE), .HTOTAL(HTOTAL), .HSA(HSA), .HBP(HBP), .HFP(HFP),
         .VACTIVE(VACTIVE), .VTOTAL(VTOTAL), .VSA(VSA), .VBP(VBP), .VFP(VFP),
         .PX0(360), .PY0(110), .PW(560), .PH(500),
-        .HOLD_FRAMES(75),                 // 30fps 下 2.5s 换一张
+        .HOLD_FRAMES(75),
         .KEY_CLK_HZ(37_500_000),
         .USE_EXT(1)
     ) u_core (
@@ -297,7 +450,7 @@ module top_board #(
     );
 
     // ------------------------------------------------------------------
-    // RGB -> AXIS
+    // RGB -> AXIS -> HDMI
     // ------------------------------------------------------------------
     wire        axis_user, axis_valid, axis_last;
     wire [23:0] axis_data;
@@ -309,9 +462,6 @@ module top_board #(
         .O_video_last(axis_last), .O_video_data(axis_data)
     );
 
-    // ------------------------------------------------------------------
-    // EDID 读取触发：上电后约 1.3ms 给一个脉冲
-    // ------------------------------------------------------------------
     reg [19:0] edid_cnt;
     reg        edid_trig;
 
@@ -327,9 +477,6 @@ module top_board #(
         end
     end
 
-    // ------------------------------------------------------------------
-    // HDMI 1.4b 发送核（720p30, VIC 4；H/V 时序仍是 1650x750）
-    // ------------------------------------------------------------------
     wire [9:0] tmds_ch0, tmds_ch1, tmds_ch2, tmds_clk;
 
     hdmi_1_4b_transmitter_core_wrapper #(
