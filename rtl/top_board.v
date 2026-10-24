@@ -424,8 +424,13 @@ module top_board #(
     // ------------------------------------------------------------------
     // 画面 + 菜单
     // ------------------------------------------------------------------
-    // 数码管调试字：{[7:4] img_idx, [3] start_req, [2] load_mode, [1] rdr_busy, [0] sd_ready}
-    wire [7:0]  dbg_ext = {img_idx[3:0], start_req, load_mode, rdr_busy, sd_ready};
+    // 数码管调试字（低字节）：
+    //   [5:4] ld_st  0=WAIT 1=ARM 2=LOAD 3=SHOW
+    //   [3]   start_req
+    //   [2]   load_mode
+    //   [1]   rdr_busy
+    //   [0]   sd_ready
+    wire [7:0]  dbg_ext = {2'b00, ld_st, start_req, load_mode, rdr_busy, sd_ready};
 
     wire        menu_open;
     wire [2:0]  dbg_item;
