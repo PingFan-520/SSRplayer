@@ -69,7 +69,9 @@ module frame_buffer #(
     input  wire        load_mode,      // 1=首次加载：整帧只写不读
     input  wire        rd_bank,        // 读缓冲：0=A(字 0 起) 1=B(字 153600 起)
     input  wire        wr_bank,        // 写缓冲：另一块
-    output wire [7:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
+    // 9 位：afifo 的 wr_used 是 [AW:0]，满的时候等于 256。
+    // 曾经截成 8 位 -> 满时变 0 -> SD 读到"空"，像素全丢、整张图写不进去。
+    output wire [8:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
     output wire        wr_idle,        // 写侧彻底排空（FIFO 空 + 无在途 burst）
     output wire [15:0] rgb_out,
     output wire        de_out
@@ -130,7 +132,7 @@ module frame_buffer #(
         .rd_valid(wf_rvld), .wr_used(wf_used)
     );
 
-    assign wr_fifo_used = wf_used[7:0];
+    assign wr_fifo_used = wf_used;          // 9 位直通，禁止截断
 
     always @(posedge pix_clk or posedge pix_rst) begin
         if (pix_rst) begin
@@ -212,9 +214,16 @@ module frame_buffer #(
     wire        addr_cont  = (bn == 3'd0) ||
                              ((wd_y == b_y) && (wd_xw == b_xw + {8'd0, bn}));
     wire        can_accept = ~bsend & ~bfull & (bgap == 4'd0);
-    wire        wd_useful  = 1'b1;      // 暂时无条件接受，先验证 burst 间隔
+    // 地址不连续/不对齐的字**绝不写**：burst 是"从 baddr 连续写 4 个"，
+    // 一旦组内混进别的行/别的列的字，它会被写到 baddr+bn 这个错误地址上，
+    // 表现为图像局部整体错位（上板看到的就是"多张图叠拼"）。
+    // 宁可丢这 1~3 个字（留下空洞），也不能写错地址。
+    // 组首只要求 4 字对齐；组内要求地址连续（addr_cont 里已含 bn==0 的情形）。
+    // 注意不能写成 badr_ok & addr_cont：badr_ok 只对组首有意义，
+    // 组内第 2~4 个字的 xw 低两位必然非 0，那样会把整组后 3 个字全丢掉。
+    wire        wd_useful  = (bn == 3'd0) ? badr_ok : addr_cont;
     wire        wd_take    = wvld & can_accept & wd_useful;
-    wire        wd_drop    = wvld & can_accept & ~wd_useful;   // 不对齐/不连续，丢弃
+    wire        wd_drop    = wvld & can_accept & ~wd_useful;   // 不对齐/不连续，丢弃整组
 
     assign wf_rd = wpop;
 
@@ -256,7 +265,12 @@ module frame_buffer #(
                 end
             end else if (bgap != 4'd0) begin
                 bgap <= bgap - 4'd1;
-            end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy) begin
+            // 关键：burst 只能在"写窗口"里发。
+            // APUG011 明确要求读写不能同时进行；双缓冲后 FIFO 里长期有积压，
+            // 若不加 wr_win_m 门控，读相位里也会冒出写 burst，
+            // 控制器会把命令丢掉/串行错（实测 40 个 burst 没落盘，
+            // 上板表现就是整屏花屏、多张图叠拼）。
+            end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy && wr_win_m) begin
                 bsend <= 1'b1;
                 bi    <= 2'd0;
                 bn    <= 3'd0;
@@ -277,8 +291,9 @@ module frame_buffer #(
                 bn <= bn + 3'd1;
             end
 
-            if (ww_d && !wr_win_m)
-                bn <= 3'd0;
+            // 这里原来在"写窗口关闭"时把 bn 清 0，相当于丢掉正在攒的那 1~3 个字。
+            // 双缓冲下窗口每帧开合两次，光这一项每帧就丢几个字（实测 160/153600）。
+            // 窗口关闭只是"暂停弹出"，FIFO 里的字还是连续地址，组状态必须保留。
         end
     end
 
@@ -334,8 +349,11 @@ module frame_buffer #(
     // 说明：曾试过"FIFO 占用 + 在途"联合限流，但 rstart 依赖 used、
     // used 依赖 outst、outst 又依赖 rd_go/rstart，形成组合环，不能这么写。
     // fcnt 现在是准的（单拍计数），阈值留 16 字余量给 burst 在途数据。
+    // 额外加 ~bsend：写 burst 在飞的 4 拍里不能起读，
+    // 否则窗口边界处会出现"读写同时"（APUG011 禁止）
     wire       rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                        (rf_used < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0);
+                        (rf_used < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0) &
+                        ~bsend;
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin

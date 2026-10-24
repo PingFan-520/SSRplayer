@@ -192,7 +192,7 @@ module top_board #(
     // ------------------------------------------------------------------
     wire [15:0] fb_rgb;
     wire        fb_de, fb_rdy;
-    wire [7:0]  fb_wf_used;
+    wire [8:0]  fb_wf_used;
     wire        fb_wr_idle;
 
     reg         load_mode;
@@ -201,6 +201,7 @@ module top_board #(
     // 图片区在屏幕上的位置（与 frame_buffer 的 IMG_X0/IMG_Y0 保持一致）
     localparam integer IMG_X0 = 320;
     localparam integer IMG_Y0 = 120;
+    localparam integer V_OFF  = 25;                  // VSA+VBP，与 frame_buffer 一致
 
     // 写侧数据源：BMP 解码 -> 自适应缩放 -> 帧缓存
     wire        sc_we;
@@ -212,7 +213,7 @@ module top_board #(
 
     frame_buffer #(
         .FB_W(1280), .FB_H(720), .VACTIVE(720),
-        .WR_LINES(25), .V_OFFSET(25),
+        .WR_LINES(25), .V_OFFSET(V_OFF),
         .IMG_W(640), .IMG_H(480), .IMG_X0(IMG_X0), .IMG_Y0(IMG_Y0)
     ) u_fb (
         .app_wr_addr  (fb_wr_addr),
@@ -411,8 +412,13 @@ module top_board #(
     reg [1:0]  sdi_sync;
     reg        done_s1, done_s2;
 
-    wire sd_ready  = sdi_sync[1];
+    wire sd_ready   = sdi_sync[1];
     wire rdr_done_p = done_s2;
+
+    // 当前这一行是不是"图片行"（帧内行号 145..624）。
+    // 换 bank 必须避开这段：否则本帧上面还是旧图、下面已经换成新图。
+    wire in_img_row = (raw_y >= (IMG_Y0 + V_OFF)) &&
+                      (raw_y <  (IMG_Y0 + V_OFF + 480));
 
     // 写侧排空标志跨到像素域（mem 125MHz -> pix 37.5MHz）
     reg  [1:0] widle_sync;
@@ -464,7 +470,10 @@ module top_board #(
                 // 153600 字，只在写窗口里跑，约 57ms（首张 load_mode=1 时约 20ms）。
                 LD_CLEAR: begin
                     sc_clr <= 1'b0;
-                    if (sc_clr_done) begin
+                    // 清屏结束还要等写 FIFO 排空：清屏最后那 256 个字可能正卡在
+                    // 写窗口外。FIFO 满着就开读的话，刚开始的像素会被丢掉
+                    // （像素通路上没有反压），图头会出现一条条没写进去的空洞。
+                    if (sc_clr_done && wr_idle_p) begin
                         fin_dly <= 13'd0;
                         ld_st   <= LD_ARM;
                     end
@@ -490,7 +499,9 @@ module top_board #(
                     // 换 bank 的条件：SD 读完 + 写侧彻底排空 + 64 拍余量。
                     // 只等固定 4000 拍是不够的：最后一批像素可能正卡在写窗口外，
                     // 窗口最坏 21ms 才开，提前换 bank 会把尾巴写进下一块缓冲。
-                    if (rdr_done_p && wr_idle_p) begin
+                    // 再要求"当前不在图片行"：换 bank 只在消隐期发生，
+                    // 否则这一帧会上面旧图、下面新图（看起来像两张图拼接）
+                    if (rdr_done_p && wr_idle_p && !in_img_row) begin
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             rd_bank   <= wr_bank;   // 显示切到刚写好的那块

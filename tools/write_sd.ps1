@@ -120,25 +120,62 @@ try {
     Log ("written: {0} bytes" -f $img.Length)
 
     # ---------- 5. read back and verify ----------
+    #  Full SHA256 + per-image slot dump. Nothing is hard-coded:
+    #  earlier version checked "1MB + 5 * 922112" which silently broke
+    #  as soon as the image layout changed (stride 1801 -> 5408 sectors).
+    $buf = New-Object byte[] $img.Length
     $fs = [IO.File]::Open("\\.\PhysicalDrive$DiskNum", 'Open', 'Read')
     try {
-        $buf = New-Object byte[] 4096
-
-        $fs.Seek(1048576, 'Begin') | Out-Null
-        $fs.Read($buf, 0, 4096) | Out-Null
-        Log ("check @1MB     : '{0}'  (expect 'BM')" -f [Text.Encoding]::ASCII.GetString($buf, 0, 2))
-
-        $bad = 0
-        for ($k = 0; $k -lt 4096; $k++) { if ($buf[$k] -ne $img[1048576 + $k]) { $bad++ } }
-        Log ("verify 4096B   : {0} mismatch" -f $bad)
-
-        $tailOff = 1048576 + 5 * 922112
-        $fs.Seek($tailOff, 'Begin') | Out-Null
-        $t = New-Object byte[] 2
-        $fs.Read($t, 0, 2) | Out-Null
-        Log ("check @last img: '{0}'  (expect 'BM')" -f [Text.Encoding]::ASCII.GetString($t, 0, 2))
+        $fs.Seek(0, 'Begin') | Out-Null
+        $got = 0
+        while ($got -lt $img.Length) {
+            $n = $fs.Read($buf, $got, $img.Length - $got)
+            if ($n -le 0) { throw "read returned 0 at $got" }
+            $got += $n
+        }
     } finally {
         $fs.Close()
+    }
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hImg  = [BitConverter]::ToString($sha.ComputeHash($img)).Replace('-', '')
+    $hCard = [BitConverter]::ToString($sha.ComputeHash($buf)).Replace('-', '')
+    if ($hImg -eq $hCard) {
+        Log "verify sha256 : match (full image)"
+    } else {
+        $bad = 0; $first = -1
+        for ($k = 0; $k -lt $img.Length; $k++) {
+            if ($buf[$k] -ne $img[$k]) { $bad++; if ($first -lt 0) { $first = $k } }
+        }
+        Log ("verify sha256 : MISMATCH - {0} bytes differ, first at 0x{1:X}" -f $bad, $first)
+        throw "read-back mismatch"
+    }
+
+    # per-image slot dump (stride derived from the image itself)
+    $slots = @()
+    $pos = 2048 * 512
+    while ($pos -lt $img.Length - 54) {
+        $p = [Array]::IndexOf($img, [byte]0x42, $pos)
+        if ($p -lt 0 -or $p -ge $img.Length - 54) { break }
+        $pos = $p + 1
+        if ($img[$p+1] -ne 0x4D) { continue }
+        $off = [BitConverter]::ToUInt32($img, $p + 10)
+        $bpp = [BitConverter]::ToUInt16($img, $p + 28)
+        $w   = [BitConverter]::ToInt32($img, $p + 18)
+        $h   = [BitConverter]::ToInt32($img, $p + 22)
+        $bf  = [BitConverter]::ToUInt32($img, $p + 2)
+        if ($off -eq 54 -and $bpp -eq 24 -and $w -gt 0 -and $w -le 4096 -and
+            [Math]::Abs($h) -ge 1 -and [Math]::Abs($h) -le 4096 -and
+            $bf -gt 54 -and ($p + $bf) -le $img.Length) {
+            $slots += [pscustomobject]@{ Pos = $p; W = $w; H = [Math]::Abs($h) }
+        }
+    }
+    $stride = 0
+    if ($slots.Count -ge 2) { $stride = $slots[1].Pos - $slots[0].Pos }
+    Log ("slots         : {0}   stride {1} bytes ({2} sectors)" -f $slots.Count, $stride, ($stride / 512))
+    foreach ($s in $slots) {
+        $tag = [Text.Encoding]::ASCII.GetString($buf, $s.Pos, 2)
+        Log ("  {0}x{1} @sector {2}  '{3}'" -f $s.W, $s.H, ($s.Pos / 512), $tag)
     }
 
     Log "RESULT: OK"
