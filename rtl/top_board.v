@@ -581,11 +581,11 @@ module top_board #(
         else if (fb_wr_drop && drop_cnt != 4'd15) drop_cnt <= drop_cnt + 4'd1;
     end
 
-    // 数码管调试字：[7:6]img_idx[1:0] [5]rd_bank [4]wr_bank
-    //   低半字节：SHOW 态显示丢字计数（正常应为 0）；其它态显示 {ld_st, sd_ready}
-    //   ld_st: 0=WAIT 1=CLEAR 2=ARM 3=LOAD 4=SHOW
-    wire [3:0] dbg_lo = (ld_st == LD_SHOW) ? drop_cnt : {ld_st, sd_ready};
-    wire [7:0]  dbg_ext = {img_idx[1:0], rd_bank, wr_bank, dbg_lo};
+    // 数码管调试字（6 位显示，左两位 = dbg_ext[7:4]，右两位 = dbg_ext[3:0]）
+    //   [7:4] 丢字计数（饱和 15），**任何状态都显示**，正常应为 0
+    //   [3:0] {ld_st[2:0], sd_ready}：
+    //         1=WAIT 3=CLEAR 5=ARM 7=LOAD 9=SHOW（sd_ready=1 时都是奇数）
+    wire [7:0]  dbg_ext = {drop_cnt, ld_st, sd_ready};
 
     wire        menu_open;
     wire [2:0]  dbg_item;
