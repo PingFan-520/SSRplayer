@@ -41,7 +41,10 @@ module top_board #(
     parameter integer SEC_BASE   = 2048,      // 第 0 张图起始扇区（1MB 偏移）
     parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
     parameter integer IMG_NUM    = 8,         // 循环张数
-    parameter integer HOLD_FRM   = 90         // 每张停留帧数（30fps 下 3 秒）
+    parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
+    // 双缓冲开关：1 = 双缓冲（换图不黑屏）；0 = 单缓冲（换图时黑一下，但路径最简单）
+    // 上板出问题时可先置 0 验证"是不是双缓冲引入的"
+    parameter integer USE_DBL    = 1
 )(
     input  wire        clk_50m,       // R7
 
@@ -513,6 +516,7 @@ module top_board #(
                 end
 
                 LD_LOAD: begin
+                    if (!USE_DBL[0]) load_mode <= 1'b1;   // 单缓冲：整帧只写不读
                     // 注意：这里不再拉高 load_mode。首次之后 load_mode 恒 0，
                     // 读写靠"图片行 vs 非图片行"在时间上分离，读侧永不中断。
                     //
@@ -531,8 +535,13 @@ module top_board #(
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             ld_wdog   <= 28'd0;
-                            rd_bank   <= wr_bank;   // 显示切到刚写好的那块
-                            wr_bank   <= ~wr_bank;  // 下一张写另一块
+                            if (USE_DBL[0]) begin
+                                rd_bank <= wr_bank;   // 显示切到刚写好的那块
+                                wr_bank <= ~wr_bank;  // 下一张写另一块
+                            end else begin
+                                rd_bank <= 1'b0;      // 单缓冲：永远用 bank0
+                                wr_bank <= 1'b0;
+                            end
                             load_mode <= 1'b0;
                             hold_frm  <= 16'd0;
                             ld_st     <= LD_SHOW;
