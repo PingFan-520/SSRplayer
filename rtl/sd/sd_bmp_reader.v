@@ -11,9 +11,19 @@
 //  一次读一个扇区（CMD17），因为参考工程的 sd_read 只实现了单块读。
 //  1801 个扇区约 385ms @25MHz SPI，切换时短暂黑场可以接受。
 //
+//  握手（2026-10-24 重写）：
+//    enable 电平，1 = 请读 img_idx 指定的那张图；
+//    done   电平，读完置 1，enable 撤销后清 0；
+//    内部 started 标志防止 enable 还高时重复启动。
+//
+//    之前用"start 脉冲 + busy 上升沿清请求"的写法在上板死锁：
+//    busy 抖一下就把请求撤了，reader 还没真正启动，之后电平启动也失效
+//    （start_req 已经是 0），现象就是数码管 25（LOAD 态但 busy=0）。
+//    改成 enable/done 后，请求不会因为 busy 的任何抖动而丢失。
+//
 //  字节流时序：rd_val_data 是 16bit/拍（每 16 个 SPI 周期一次），
-//  这里用"当拍出低字节、下一拍出高字节"的方式拆开，
-//  bmp_decode 要求相邻字节至少间隔 1 拍，满足。
+//    这里"当拍出高字节、下一拍出低字节"，
+//    bmp_decode 要求相邻字节至少间隔 1 拍，满足。
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -33,11 +43,11 @@ module sd_bmp_reader #(
     input  wire [15:0] rd_val_data,
     input  wire        sd_init_done,
 
-    // ---- 控制 ----
-    input  wire        start,          // 单拍：开始读一张图
-    input  wire [7:0]  img_idx,        // 当前是第几张（决定起始扇区）
-    output reg         busy,
-    output reg         done,           // 单拍：一张读完
+    // ---- 控制（电平）----
+    input  wire        enable,         // 1 = 开始读 img_idx 对应的一张图
+    input  wire [7:0]  img_idx,
+    output reg         busy,           // 正在读
+    output reg         done,           // 读完（电平保持到 enable 撤销）
 
     // ---- 字节流输出（进异步 FIFO 再到 pix 域）----
     output reg  [7:0]  byte_data,
@@ -56,37 +66,29 @@ module sd_bmp_reader #(
     reg [8:0]  word_cnt;
     reg [7:0]  pend;
     reg        pend_v;
+    reg        started;
 
     // ------------------------------------------------------------------
-    // 控制信号来自像素域（37.5MHz），这里是 25MHz，必须同步 / 取边沿
+    // 跨时钟同步
     // ------------------------------------------------------------------
-    reg  st_s1, st_s2, st_s3;
-    reg  sdi_s1, sdi_s2;
+    reg  en_s1, en_s2;
     reg  [7:0] ix_s1, ix_s2;
+    reg  sdi_s1, sdi_s2;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            st_s1 <= 1'b0; st_s2 <= 1'b0; st_s3 <= 1'b0;
-            sdi_s1 <= 1'b0; sdi_s2 <= 1'b0;
-            ix_s1 <= 8'd0; ix_s2 <= 8'd0;
+            en_s1  <= 1'b0;  en_s2  <= 1'b0;
+            ix_s1  <= 8'd0;  ix_s2  <= 8'd0;
+            sdi_s1 <= 1'b0;  sdi_s2 <= 1'b0;
         end else begin
-            st_s1 <= start;
-            st_s2 <= st_s1;
-            st_s3 <= st_s2;
+            en_s1  <= enable;
+            en_s2  <= en_s1;
+            ix_s1  <= img_idx;
+            ix_s2  <= ix_s1;
             sdi_s1 <= sd_init_done;
             sdi_s2 <= sdi_s1;
-            ix_s1 <= img_idx;      // 上层换图后会先等 16 拍，这里再打两拍
-            ix_s2 <= ix_s1;
         end
     end
-
-    // 电平启动，不用边沿：
-    //   start 是像素域电平，上层一直保持到 busy 拉高才撤。
-    //   用边沿只有一次机会，只要那一拍 sd_init_done 还没同步过来就永久错过，
-    //   表现就是 busy 永远是 0、load_mode 永远卡在 1（上板实测 05）。
-    wire start_lvl = st_s2;
-    wire sdi_ok    = sdi_s2;
-    wire start_p   = st_s2 & ~st_s3;        // 仅留作观测
 
     // 每张图的起始扇区 = SEC_BASE + img_idx * SEC_STRIDE
     wire [31:0] img_base = SEC_BASE + ix_s2 * SEC_STRIDE;
@@ -105,14 +107,21 @@ module sd_bmp_reader #(
             byte_valid  <= 1'b0;
             pend        <= 8'd0;
             pend_v      <= 1'b0;
+            started     <= 1'b0;
         end else begin
-            done       <= 1'b0;
+            // done 必须是"电平保持"而不是单拍脉冲：
+            // 它在 25MHz 域产生，上层在 37.5MHz 域用两级同步器采，
+            // 40ns 的窄脉冲有可能被整拍漏掉，导致上层永远等不到"读完"。
             byte_valid <= 1'b0;
 
+            // enable 撤销后清掉内部标志，允许下一次启动
+            if (!en_s2) begin
+                started <= 1'b0;
+                done    <= 1'b0;
+            end
+
             // ---- 16bit -> 2 字节 ----
-            // 注意顺序：sd_read 的 rx_data_t 是左移拼接（{rx_data_t[14:0], miso}），
-            // 所以先收到的那个字节落在 [15:8]。BMP 解码要严格按文件字节序，
-            // 这里必须先输出高字节，否则整张图会变成字节交换后的花屏。
+            // SPI 先收到的字节在 [15:8]（sd_read 的 rx_data_t 是左移拼接）
             if (rd_val_en) begin
                 byte_data  <= rd_val_data[15:8];
                 byte_valid <= 1'b1;
@@ -126,11 +135,13 @@ module sd_bmp_reader #(
 
             case (st)
                 S_IDLE: begin
-                    if (start_lvl && sdi_ok) begin
+                    // 电平启动 + started 防重复
+                    if (en_s2 && sdi_s2 && !started) begin
                         base_sec <= img_base;
                         sec_cnt  <= 16'd0;
                         word_cnt <= 9'd0;
                         busy     <= 1'b1;
+                        started  <= 1'b1;
                         st       <= S_CMD;
                     end
                 end
@@ -158,9 +169,10 @@ module sd_bmp_reader #(
                     // 等 sd_read 收完 CRC、rd_busy 落下
                     if (!rd_busy) begin
                         if (sec_cnt + 16'd1 >= SEC_NUM[15:0]) begin
-                            busy <= 1'b0;
-                            done <= 1'b1;
-                            st   <= S_IDLE;
+                            busy    <= 1'b0;
+                            done    <= 1'b1;
+                            started <= 1'b0;
+                            st      <= S_IDLE;
                         end else begin
                             sec_cnt  <= sec_cnt + 16'd1;
                             word_cnt <= 9'd0;

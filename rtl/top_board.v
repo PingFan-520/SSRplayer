@@ -271,7 +271,8 @@ module top_board #(
     wire       rdr_busy;
 
     reg  [7:0] img_idx;
-    reg        start_req;          // pix 域电平请求（SD 域取上升沿启动）
+    reg        rd_en;              // pix 域电平请求（reader 用 done 应答）
+    wire       rdr_done;
 
     sd_bmp_reader #(
         .SEC_BASE(SEC_BASE), .SEC_STRIDE(SEC_STRIDE), .SEC_NUM(SEC_STRIDE)
@@ -286,10 +287,10 @@ module top_board #(
         .rd_val_data  (sd_rd_val_data),
         .sd_init_done (sd_init_done),
 
-        .start        (start_req),
+        .enable       (rd_en),
         .img_idx      (img_idx),
         .busy         (rdr_busy),
-        .done         (),
+        .done         (rdr_done),
 
         .byte_data    (sd_byte),
         .byte_valid   (sd_byte_vld)
@@ -342,30 +343,33 @@ module top_board #(
     reg [1:0]  ld_st;
     reg [12:0] fin_dly;
     reg [15:0] hold_frm;
-    reg        busy_d;
-    reg [1:0]  sdi_sync, rbsy_sync;
+    reg [1:0]  sdi_sync;
+    reg        done_s1, done_s2;
 
-    wire sd_ready   = sdi_sync[1];
-    wire rdr_busy_p = rbsy_sync[1];
-    wire frame_top  = (raw_y == 12'd0) && (raw_x == 12'd0);
+    wire sd_ready  = sdi_sync[1];
+    wire rdr_done_p = done_s2;
+    wire frame_top = (raw_y == 12'd0) && (raw_x == 12'd0);
 
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
-            sdi_sync  <= 2'b00;
-            rbsy_sync <= 2'b00;
-            busy_d    <= 1'b0;
+            sdi_sync <= 2'b00;
+            done_s1  <= 1'b0;
+            done_s2  <= 1'b0;
         end else begin
-            sdi_sync  <= {sdi_sync[0],  sd_init_done};
-            rbsy_sync <= {rbsy_sync[0], rdr_busy};
-            busy_d    <= rdr_busy_p;
+            sdi_sync <= {sdi_sync[0], sd_init_done};
+            done_s1  <= rdr_done;          // reader 的 done 是电平
+            done_s2  <= done_s1;
         end
     end
 
+    // 轮播：WAIT -> LOAD -> SHOW -> ARM -> LOAD ...
+    //   LOAD 期间 load_mode=1（整帧只写不读），rd_en 保持高电平请求，
+    //   reader 用 done 电平回答；不再依赖 busy 的边沿，避免毛刺误清请求。
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
             ld_st     <= LD_WAIT;
             img_idx   <= 8'd0;
-            start_req <= 1'b0;
+            rd_en     <= 1'b0;
             load_mode <= 1'b1;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
@@ -373,9 +377,9 @@ module top_board #(
             case (ld_st)
                 LD_WAIT: begin
                     if (sd_ready) begin
-                        ld_st     <= LD_LOAD;
-                        start_req <= 1'b1;
-                        fin_dly   <= 13'd0;
+                        rd_en   <= 1'b1;
+                        fin_dly <= 13'd0;
+                        ld_st   <= LD_LOAD;
                     end
                 end
 
@@ -384,9 +388,9 @@ module top_board #(
                 // 避免多比特总线正在变化时被采样。
                 LD_ARM: begin
                     if (fin_dly == 13'd16) begin
-                        start_req <= 1'b1;
-                        fin_dly   <= 13'd0;
-                        ld_st     <= LD_LOAD;
+                        rd_en   <= 1'b1;
+                        fin_dly <= 13'd0;
+                        ld_st   <= LD_LOAD;
                     end else begin
                         fin_dly <= fin_dly + 13'd1;
                     end
@@ -394,10 +398,10 @@ module top_board #(
 
                 LD_LOAD: begin
                     load_mode <= 1'b1;
-                    if (rdr_busy_p) start_req <= 1'b0;   // 已启动，撤请求
-                    if (busy_d && !rdr_busy_p) begin      // busy 下降沿 = 读完
+                    if (rdr_done_p) begin
                         if (fin_dly == 13'd4000) begin
                             load_mode <= 1'b0;
+                            rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             hold_frm  <= 16'd0;
                             ld_st     <= LD_SHOW;
                         end else begin
@@ -425,12 +429,13 @@ module top_board #(
     // 画面 + 菜单
     // ------------------------------------------------------------------
     // 数码管调试字（低字节）：
+    //   [6]   done_p (reader 读完)
     //   [5:4] ld_st  0=WAIT 1=ARM 2=LOAD 3=SHOW
-    //   [3]   start_req
+    //   [3]   rd_en
     //   [2]   load_mode
     //   [1]   rdr_busy
     //   [0]   sd_ready
-    wire [7:0]  dbg_ext = {2'b00, ld_st, start_req, load_mode, rdr_busy, sd_ready};
+    wire [7:0]  dbg_ext = {1'b0, rdr_done_p, ld_st, rd_en, load_mode, rdr_busy, sd_ready};
 
     wire        menu_open;
     wire [2:0]  dbg_item;
