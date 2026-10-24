@@ -48,3 +48,8 @@ sd_verify_log.txt
 # ---- 仿真临时文件 ----
 sim/work_scale/
 sim/scale.log
+
+sim/scale_out.raw
+sim/scale_out.png
+sim/chain.log
+sim/scale_in.bmp
