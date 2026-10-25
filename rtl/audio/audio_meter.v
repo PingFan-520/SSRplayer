@@ -1,33 +1,38 @@
 // ============================================================================
-//  audio_meter.v —— 音频电平可视化（32 柱频谱条）
+//  audio_meter.v —— 音频电平可视化（32 柱瀑布图 + 纵向彩虹渐变）
 //
-//  赛题扩展要求 (5) "音频可视化表现：结合音频数据生成频谱或波形显示"。
+//  参考 设计参考文档/Music-Spectrum-main 的做法（FFT + 峰值衰减 + 彩虹色），
+//  本设计没有 FFT（音源是单音，做出来也只是一根柱子），但把它"好看"的
+//  几个要素照搬了：
+//    ① **逐帧刷新**：每帧只推一列，帧内画面绝对稳定。
+//       上一版每 512 拍推一列（一帧推 3 列、横向跳 24 像素），看起来就是"一直在闪"
+//    ② **纵向彩虹渐变**（红->橙->黄->绿->青->蓝），像真正的频谱仪
+//    ③ **峰值保持**：每列取这一帧内的峰值，而不是瞬时值
 //
-//  做法：
-//    - 每 512 个音频采样（48kHz，即 10.7ms）把这段时间的**峰值**推进一根柱子，
-//      32 根柱子构成一个 0.34 秒的滑动历史 —— 视觉上就是"声音在跳动"。
-//     - 柱子画在图片区下方的黑底区域（y 624..711），不遮挡画面和菜单。
-//     - 柱子颜色按高度分三段：底部绿、中部黄、顶部红（像 VU 表）。
-//     - 纯比较器 + 32x8 移位寄存器，不占 BRAM/DSP/乘法器。
+//  几何：x 500..755（32 列 x 8 px），y 620..715（高 96）
+//        位于图片区（y 120..599）与菜单面板（y 110..609）下方的空白带，
+//        不遮挡任何内容。
 //
-//  为什么不做真正的频谱：FFT 要几百个乘法器和一堆 BRAM；
-//  而且本设计的音源是单音（每步一个频率），做出来也只会有一根柱子。
-//  用"包络峰值历史"既能真实反映音量/节奏，又便宜得多。
+//  输出是纯组合的，但路径很短（32:1 mux + 比较 + 颜色 case）。
+//  上一版在输出后又串了一级 alpha_blend（3 个 8x4 乘法器），与本级 mux 叠加
+//  把像素通路拉长；现在改成**直接选择**（下方是黑底，不需要混合），
+//  少了一整级乘法，也消除了"画面边缘撕裂"的隐患。
 // ============================================================================
 `timescale 1ns / 1ps
 
 module audio_meter #(
-    parameter integer X0   = 480,     // 面板左上角（屏幕坐标）
-    parameter integer Y0   = 624,
+    parameter integer X0   = 500,     // 面板左上角（屏幕坐标）
+    parameter integer Y0   = 620,
     parameter integer BARW = 8,       // 每根柱子占 8 像素（6 实 + 2 空）
     parameter integer NBAR = 32,      // 柱子数
-    parameter integer MAXH = 88       // 柱区高度（像素）
+    parameter integer MAXH = 96       // 柱区高度（像素）
 )(
     input  wire        clk,
     input  wire        rst,
 
     input  wire [11:0] x,             // 已与视频对齐的坐标
     input  wire [11:0] y,
+    input  wire        frame_start,   // 帧首单拍：只在此时推进一列
     input  wire [7:0]  level,         // 音频包络（含音量），48kHz 更新
     input  wire        enable,        // 0 = 不显示
 
@@ -37,32 +42,27 @@ module audio_meter #(
 );
 
     // ------------------------------------------------------------------
-    // 柱子历史：每 512 采样推一列
+    // 柱子历史：每帧推一列，取这一帧内的峰值
     // ------------------------------------------------------------------
     reg [7:0] bars [0:NBAR-1];
     reg [7:0] peak;
-    reg [8:0] cnt;
 
     integer i;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             peak <= 8'd0;
-            cnt  <= 9'd0;
             for (i = 0; i < NBAR; i = i + 1)
                 bars[i] <= 8'd0;
         end else begin
             if (level > peak)
                 peak <= level;
 
-            if (cnt == 9'd511) begin
+            if (frame_start) begin
                 for (i = NBAR - 1; i > 0; i = i - 1)
                     bars[i] <= bars[i-1];
                 bars[0] <= peak;
                 peak    <= 8'd0;
-                cnt     <= 9'd0;
-            end else begin
-                cnt <= cnt + 9'd1;
             end
         end
     end
@@ -79,28 +79,43 @@ module audio_meter #(
     wire [11:0] dx = x - X0[11:0];
     wire [11:0] dy = y - Y0[11:0];
 
-    // BARW=8 -> 柱索引取 dx[7:3]；柱内 2 像素间隙不画
-    // bars[0] 是最新的一列，画在最右边（和示波器/频谱仪的习惯一致）
-    wire [4:0]  bi = 5'd31 - dx[7:3];
-    wire        ingap = (dx[2:0] >= 3'd6);
+    // bars[0] 是最新的一列，画在最右边（示波器/瀑布图习惯）
+    wire [4:0]  bi    = 5'd31 - dx[7:3];
+    wire        ingap = (dx[2:0] >= 3'd6);      // 柱内 2 像素间隙
 
     wire [7:0]  lv = bars[bi];
-    wire [8:0]  hh = {1'b0, lv[7:1]};                 // 0..127
+    // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）
+    wire [8:0]  hh  = {1'b0, lv[7:1]} + {2'b00, lv[7:3]};
     wire [8:0]  hcl = (hh > MAXH[8:0]) ? MAXH[8:0] : hh;
     wire [11:0] thr = MAXH[11:0] - {3'b000, hcl};
 
     wire filled = in_rect && ~ingap && (dy >= thr);
 
-    // 颜色按柱内高度分段（顶部红、中部黄、底部绿）
-    wire is_red    = (dy < MAXH[11:0] / 8);
-    wire is_yellow = (dy < (MAXH[11:0] * 2) / 5);
+    // ------------------------------------------------------------------
+    // 纵向彩虹渐变：红 -> 橙 -> 黄 -> 绿 -> 青 -> 蓝
+    //   （顶部红、底部蓝，频谱仪最常见的配色）
+    // ------------------------------------------------------------------
+    localparam [11:0] Z1 = (MAXH * 16) / 100;   // 16%
+    localparam [11:0] Z2 = (MAXH * 32) / 100;   // 32%
+    localparam [11:0] Z3 = (MAXH * 48) / 100;   // 48%
+    localparam [11:0] Z4 = (MAXH * 66) / 100;   // 66%
+    localparam [11:0] Z5 = (MAXH * 84) / 100;   // 84%
+
+    reg [23:0] col;
+
+    always @(*) begin
+        if      (dy < Z1) col = 24'hFF2A18;     // 红
+        else if (dy < Z2) col = 24'hFF8C1A;     // 橙
+        else if (dy < Z3) col = 24'hFFE01E;     // 黄
+        else if (dy < Z4) col = 24'h3CE03C;     // 绿
+        else if (dy < Z5) col = 24'h26D2F0;     // 青
+        else              col = 24'h3355FF;     // 蓝
+    end
 
     always @(*) begin
         on    = filled;
-        alpha = filled ? 4'd7 : 4'd0;
-        rgb   = is_red    ? 24'hFF3020 :
-                is_yellow ? 24'hFFD020 :
-                            24'h20E040;
+        alpha = filled ? 4'd8 : 4'd0;
+        rgb   = col;
     end
 
 endmodule

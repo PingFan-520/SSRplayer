@@ -272,8 +272,7 @@ module top_osd_demo #(
         end
     end
 
-    // 两级混合：先叠菜单，再叠音频电平表（两者区域不重叠，顺序无所谓，
-    // 但放在后面可以保证电平表永远在最上层）
+    // 先叠菜单（alpha 混合），再叠音频电平表
     wire [23:0] blend_menu;
 
     alpha_blend u_blend (
@@ -285,28 +284,28 @@ module top_osd_demo #(
 
     // ------------------------------------------------------------------
     // 音频电平可视化（扩展要求 5）
-    //   用已对齐到视频的 xd4/yd4 直接算，纯组合，不再增加流水
+    //   用已对齐到视频的 xd4/yd4 直接算。
+    //   ★ 这一级改成**直接选择**而不是再串一级 alpha_blend：
+    //     电平表画在图片区下方的黑底上，本来就不需要混合；
+    //     去掉那 3 个 8x4 乘法器，像素通路短了一大截
+    //     （上一版"画面边缘轻微撕裂"就是这条路太长导致的）。
     // ------------------------------------------------------------------
     wire        m_on;
     wire [23:0] m_rgb;
     wire [3:0]  m_alpha;
 
     audio_meter #(
-        .X0(480), .Y0(624), .BARW(8), .NBAR(32), .MAXH(88)
+        .X0(500), .Y0(620), .BARW(8), .NBAR(32), .MAXH(96)
     ) u_meter (
         .clk(clk), .rst(rst),
         .x(xd4), .y(yd4),
+        .frame_start(frame_tick),      // 每帧只推一列 -> 帧内绝对稳定
         .level(aud_lvl),
         .enable(aud_meter_en),
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );
 
-    alpha_blend u_blend_meter (
-        .vid_rgb (blend_menu),
-        .osd_rgb (m_rgb),
-        .alpha   (m_alpha),
-        .out_rgb (rgb_out)
-    );
+    assign rgb_out = m_on ? m_rgb : blend_menu;
 
     assign hs_out = hsd4;
     assign vs_out = vsd4;

@@ -51,13 +51,22 @@ module tb_audio;
     wire [3:0]  m_alpha;
 
     reg  [11:0] mx = 12'd0, my = 12'd0;
+    reg         mfs = 1'b0;            // 帧首（推一列）
 
-    audio_meter #(.X0(480), .Y0(624), .BARW(8), .NBAR(32), .MAXH(88)) u_m (
+    audio_meter #(.X0(500), .Y0(620), .BARW(8), .NBAR(32), .MAXH(96)) u_m (
         .clk(clk), .rst(rst),
         .x(mx), .y(my),
+        .frame_start(mfs),
         .level(level), .enable(men),
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );
+
+    // 推一列：给一个 frame_start 脉冲
+    task push_col; begin
+        @(negedge clk); mfs = 1'b1;
+        @(negedge clk); mfs = 1'b0;
+        repeat (4) @(negedge clk);
+    end endtask
 
     // ------------------------------------------------------------------
     // 1) 采样率：数 375000 拍（10ms）内的 aud_valid 个数，应为 480
@@ -89,7 +98,7 @@ module tb_audio;
     always @(posedge clk) begin
         if (av_a) begin
             v_a = $signed(l_a);                  // 24 位有符号，判符号用
-            mag_a = l_a[23] ? ((24'h1000000 - l_a)) : l_a;   // |sample|
+            mag_a = l_a[23] ? ((~l_a + 24'd1)) : l_a;         // |sample|（24 位补码取负）
             if (seg < 8) begin
                 if (!last_neg && (v_a < 0)) zc_a[seg] = zc_a[seg] + 1;
                 if (mag_a > pk_a[seg]) pk_a[seg] = mag_a;
@@ -104,7 +113,7 @@ module tb_audio;
         end
 
         if (av_b) begin
-            mag_a = l_b[23] ? ((24'h1000000 - l_b)) : l_b;
+            mag_a = l_b[23] ? ((~l_b + 24'd1)) : l_b;
             if (mag_a > pk_b) pk_b = mag_a;
             last_neg_b = l_b[23];
         end
@@ -188,43 +197,54 @@ module tb_audio;
         vol_a = 4'd10;
 
         // ---- 4) 电平表 ----
-        // level=255 -> 柱高被夹到 MAXH=88 -> 整列填满；间隙列 dx[2:0]>=6 不画
+        // level=255 -> 高度 0.625*255=159 被夹到 MAXH=96 -> 整列填满
         level = 8'd255;
-        repeat (20000) @(negedge clk);         // 32 列全部填满（每列 512 拍）
-        my = 12'd624;      mx = 12'd480;       // 柱底（dy=0 是顶部，dy=87 是底部）
-        #1; if (!m_on) begin $display("[FAIL] 电平表：满幅柱顶未点亮"); errs = errs + 1; end
-        my = 12'd711;      mx = 12'd480;       // 最底一行
-        #1; if (!m_on) begin $display("[FAIL] 电平表：满幅柱底未点亮"); errs = errs + 1; end
-        mx = 12'd486;      my = 12'd700;       // 柱内间隙（dx[2:0]=6）
-        #1; if (m_on) begin $display("[FAIL] 电平表：柱子间隙不该点亮"); errs = errs + 1; end
-        mx = 12'd480;      my = 12'd620;       // 面板上方
-        #1; if (m_on) begin $display("[FAIL] 电平表：面板外不该点亮"); errs = errs + 1; end
+        for (i = 0; i < 40; i = i + 1) push_col;      // 32 列全部填满
+        mx = 12'd500; my = 12'd620;      // 柱顶（dy=0）
+        #1; if (!m_on) begin $display("[FAIL] 满幅：柱顶未点亮"); errs = errs + 1; end
+        mx = 12'd503; my = 12'd715;      // 柱底（dy=95）
+        #1; if (!m_on) begin $display("[FAIL] 满幅：柱底未点亮"); errs = errs + 1; end
+        mx = 12'd506; my = 12'd700;      // dx[2:0]=6 -> 柱子间隙
+        #1; if (m_on) begin $display("[FAIL] 柱子间隙不该点亮"); errs = errs + 1; end
+        mx = 12'd500; my = 12'd610;      // 面板上方（菜单区）
+        #1; if (m_on) begin $display("[FAIL] 面板外不该点亮"); errs = errs + 1; end
+        mx = 12'd760; my = 12'd680;      // 面板右侧（x 边界外）
+        #1; if (m_on) begin $display("[FAIL] 面板外(右)不该点亮"); errs = errs + 1; end
 
-        // level=64 -> 柱高 32 -> thr=88-32=56；dy=87 亮、dy=10 灭
+        // level=64 -> 高度 0.625*64=40 -> thr=56；dy=95 亮、dy=40 灭
         level = 8'd64;
-        repeat (2048) @(negedge clk);
-        mx = 12'd728; my = 12'd711;            // 最右一列 = 最新数据
+        for (i = 0; i < 40; i = i + 1) push_col;
+        mx = 12'd503; my = 12'd715;
         #1; if (!m_on) begin $display("[FAIL] 低电平：柱底应点亮"); errs = errs + 1; end
-        mx = 12'd728; my = 12'd640;
-        #1; if (m_on) begin $display("[FAIL] 低电平：柱高应较低（dy=16 不该亮）"); errs = errs + 1; end
-        $display("[ok] 电平表高度/间隙/边界正确");
+        mx = 12'd503; my = 12'd660;      // dy=40 < 56
+        #1; if (m_on) begin $display("[FAIL] 低电平：柱高应较低（dy=40 不该亮）"); errs = errs + 1; end
 
-        // ---- 5) 用一段"衰减型包络"填满 32 列，dump 成 PPM 看效果 ----
+        // 颜色分段：顶部红、底部蓝
+        level = 8'd255;
+        for (i = 0; i < 40; i = i + 1) push_col;
+        mx = 12'd503; my = 12'd625;      // dy=5 -> 红
+        #1; if (m_rgb !== 24'hFF2A18) begin
+            $display("[FAIL] 顶部颜色 %06h，应为红 FF2A18", m_rgb); errs = errs + 1; end
+        mx = 12'd503; my = 12'd710;      // dy=90 -> 蓝
+        #1; if (m_rgb !== 24'h3355FF) begin
+            $display("[FAIL] 底部颜色 %06h，应为蓝 3355FF", m_rgb); errs = errs + 1; end
+        $display("[ok] 电平表几何/间隙/颜色分段正确");
+
+        // ---- 5) 逐帧推一列，dump 成 PPM 看效果 ----
         begin : dump_meter
-            integer fd, bx, by, bi2, lvv;
-            reg [23:0] cc;
-            for (bi2 = 0; bi2 < 32; bi2 = bi2 + 1) begin
-                lvv = 240 - (bi2 % 8) * 26;            // 240,214,...,58 循环
+            integer fd, bx, by, cc, lvv;
+            for (i = 0; i < 32; i = i + 1) begin
+                lvv = 230 - (i % 8) * 24;              // 230,206,...,62 循环
                 level = lvv[7:0];
-                repeat (600) @(negedge clk);           // > 512，推一列
+                push_col;
             end
             level = 8'd0;
             fd = $fopen("meter_out.ppm", "wb");
-            $fwrite(fd, "P6\n256 88\n255\n");
-            for (by = 0; by < 88; by = by + 1) begin
+            $fwrite(fd, "P6\n256 96\n255\n");
+            for (by = 0; by < 96; by = by + 1) begin
                 for (bx = 0; bx < 256; bx = bx + 1) begin
-                    mx = 480 + bx;
-                    my = 624 + by;
+                    mx = 500 + bx;
+                    my = 620 + by;
                     #1;
                     cc = m_on ? m_rgb : 24'h000000;
                     $fwrite(fd, "%c%c%c", cc[23:16], cc[15:8], cc[7:0]);
