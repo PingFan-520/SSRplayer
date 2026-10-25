@@ -46,7 +46,8 @@ def main():
     decls = []
     for pat in [r"    reg \[2:0\]  ld_st;", r"    reg \[12:0\] fin_dly;",
                 r"    reg \[15:0\] hold_frm;", r"    reg        clr_ok;.*?\n",
-                r"    reg \[25:0\] clr_wdog;.*?\n", r"    reg \[27:0\] ld_wdog;.*?\n"]:
+                r"    reg \[25:0\] clr_wdog;.*?\n", r"    reg \[27:0\] ld_wdog;.*?\n",
+                r"    reg  \[1:0\]  scale_d;.*?\n"]:
         mm = re.search(pat, src)
         if mm:
             decls.append(mm.group(0).rstrip())
@@ -60,6 +61,20 @@ def main():
 
     out = os.path.join(ROOT, "sim", "tb_fsm.v")
     io.open(out, "w", encoding="utf-8", newline="\n").write(tb)
+    # ---- 自检：FSM 里被赋值的信号必须在 TB 中声明 ----
+    # 这个坑踩过：FSM 新增了信号（如 scale_d）而 TB 没声明，
+    # vlog 直接报 Undefined variable，白跑一轮。
+    assigned = set(re.findall(r"^\s*([A-Za-z_]\w*)\s*(?:<=|=)(?!=)", fsm, re.M))
+    declared = set(re.findall(r"\b(?:reg|wire|parameter\s+integer|integer)\b[^;\n]*?\b([A-Za-z_]\w*)\s*(?:=|;|,)", tb))
+    # 上面只抓每行最后一个名字，补一次全量扫描
+    for m2 in re.finditer(r"^\s*(?:reg|wire|integer)\b[^;]*;", tb, re.M):
+        for nm in re.findall(r"([A-Za-z_]\w*)", m2.group(0)):
+            declared.add(nm)
+    missing = sorted(a for a in assigned if a not in declared)
+    if missing:
+        print("  [WARN] TB 缺声明: %s" % ", ".join(missing))
+        print("        请在 gen_fsm_tb.py 的 decls 列表里补上，否则 vlog 会报 Undefined variable")
+
     print("生成 %s" % out)
     print("  FSM %d 行 / 声明 %d 项 / 参数 %d 行"
           % (len(fsm.splitlines()), len(decls), len(params.splitlines())))
@@ -109,6 +124,7 @@ module tb_fsm;
     reg  [19:0] rd_wipe;
     reg        img_changed;
     reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走淡出/淡入
+    reg  [1:0] dbg_scale  = 2'd0;   // 缩放模式（FSM 里做变化检测）
     reg  [7:0] fade_lvl;
     reg  [7:0] img_idx;
 

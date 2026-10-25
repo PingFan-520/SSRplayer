@@ -42,9 +42,14 @@ module top_board #(
     parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
     parameter integer IMG_NUM    = 8,         // 循环张数
     parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
-    // 双缓冲开关：1 = 双缓冲（换图不黑屏）；0 = 单缓冲（换图时黑一下，但路径最简单）
-    // 上板出问题时可先置 0 验证"是不是双缓冲引入的"
-    parameter integer USE_DBL    = 0
+    // 双缓冲开关：1 = 双缓冲（换图/淡入淡出转场必须用它）；0 = 单缓冲（换图黑一下）
+    //   ★ 2026-10-25：从 0 改回 1。
+    //   之前一直是 0（上次"改回单缓冲"后，那条 edit 的锚点文本已变，替换静默失败，
+    //   于是后面所有版本实际都跑单缓冲），直接导致：
+    //     ① 转场那条 if (USE_DBL && effect != CUT) 永远不成立 -> 换图是硬切，
+    //        菜单里的转场特效全部无效（上板看到的"转场失效"就是这个）；
+    //     ② 加载期 load_mode=1 -> 整屏黑一下。
+    parameter integer USE_DBL    = 1
 )(
     input  wire        clk_50m,       // R7
 
@@ -206,6 +211,7 @@ module top_board #(
     // 淡入淡出转场：255=正常亮度，0=全黑。换 bank 发生在全黑那一刻，看不见。
     reg  [7:0]  fade_lvl;
     reg         img_changed;        // 换图脉冲（给转场做淡入）
+    reg  [1:0]  scale_d;            // 上一次加载用的缩放模式（变了就重载当前图）
 
     // 图片区在屏幕上的位置（与 frame_buffer 的 IMG_X0/IMG_Y0 保持一致）
     localparam integer IMG_X0 = 320;
@@ -393,7 +399,7 @@ module top_board #(
         .s_rgb    (bmp_rgb),
         .img_w    (bmp_w),
         .img_h    (bmp_h),
-        .k_extra  (dbg_scale),
+        .mode     (dbg_scale),
 
         .clr      (sc_clr),
         .clr_done (sc_clr_done),
@@ -477,6 +483,7 @@ module top_board #(
             wr_bank   <= 1'b0;
             fade_lvl  <= 8'd255;
             img_changed <= 1'b0;
+            scale_d   <= 2'd0;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
@@ -556,7 +563,7 @@ module top_board #(
                             // 交叉淡化需要同时读新旧两个地址，单读口带宽不够，
                             // 所以用"中间经过一帧全黑"的经典做法。
                             if (USE_DBL[0] && (dbg_effect != 2'd3)) begin
-                                fade_lvl <= 8'd224;      // 从接近满亮度开始往下降
+                                fade_lvl <= 8'd255;      // 从满亮度开始淡出（不要中途掉亮）
                                 ld_st    <= LD_FADE_OUT;
                             end else begin
                                 rd_bank  <= USE_DBL[0] ? wr_bank : 1'b0;
@@ -603,15 +610,29 @@ module top_board #(
                 LD_SHOW: begin
                     if (fade_lvl != 8'd255) fade_lvl <= 8'd255;
                     if (frame_top) hold_frm <= hold_frm + 16'd1;
-                    if (hold_frm >= HOLD_FRM[15:0]) begin
+
+                    // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
+                    // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
+                    // 否则用户会以为缩放坏了（上板反馈过“缩放无法使用”）。
+                    if (dbg_scale != scale_d) begin
+                        scale_d   <= dbg_scale;
+                        if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
+                        sc_clr    <= 1'b1;
+                        clr_ok    <= 1'b0;
+                        clr_wdog  <= 26'd0;
+                        fin_dly   <= 13'd0;
+                        hold_frm  <= 16'd0;
+                        ld_st     <= LD_CLEAR;
+                    end else if (hold_frm >= HOLD_FRM[15:0]) begin
                         img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
                                                                      : (img_idx + 8'd1);
+                        scale_d   <= dbg_scale;
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
                         if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
-                        clr_wdog  <= 24'd0;
+                        clr_wdog  <= 26'd0;
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end

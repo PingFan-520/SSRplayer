@@ -42,10 +42,12 @@ module tb_bmp_scale_chain;
     wire [15:0] sc_rgb;
     wire [2:0]  sc_k;
 
+    reg [1:0] mode_t = 2'd0;       // +MODE=0/1/2
+
     bmp_scale #(.DW(DW), .DH(DH)) u_scale (
         .clk(clk), .rst(rst),
         .s_we(o_we), .s_sx(o_sx), .s_sy(o_sy), .s_rgb(o_rgb),
-        .img_w(img_w), .img_h(img_h), .k_extra(2'd0),
+        .img_w(img_w), .img_h(img_h), .mode(mode_t),
         .clr(1'b0), .clr_done(), .clr_busy(),
         .o_rdy(1'b1),
         .o_we(sc_we), .o_x(sc_x), .o_y(sc_y), .o_rgb(sc_rgb), .o_k(sc_k)
@@ -71,7 +73,7 @@ module tb_bmp_scale_chain;
     // ------------------------------------------------------------------
     // 主流程：从文件逐字节喂
     // ------------------------------------------------------------------
-    integer fd, ch, nbyte, x, y;
+    integer fd, ch, nbyte, x, y, void_ignore;
     reg [1023:0] fname;
 
     initial begin
@@ -79,6 +81,8 @@ module tb_bmp_scale_chain;
             $display("[ERR] 需要 +FILE=<bmp>");
             $finish;
         end
+        void_ignore = $value$plusargs("MODE=%d", mode_t);
+        $display("[chain] mode=%0d (0=FIT 1=FILL 2=STRETCH)", mode_t);
         fd = $fopen(fname, "rb");
         if (fd == 0) begin
             $display("[ERR] 打不开 %0s", fname);

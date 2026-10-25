@@ -21,6 +21,7 @@ module tb_bmp_scale;
     reg [15:0] s_rgb = 16'd0;
     reg [15:0] img_w = 16'd0;
     reg [15:0] img_h = 16'd0;
+    reg [1:0]  mode  = 2'd0;
 
     reg        clr = 1'b0;
     wire       clr_done, clr_busy;
@@ -34,7 +35,7 @@ module tb_bmp_scale;
     bmp_scale #(.DW(640), .DH(480)) dut (
         .clk(clk), .rst(rst),
         .s_we(s_we), .s_sx(s_sx), .s_sy(s_sy), .s_rgb(s_rgb),
-        .img_w(img_w), .img_h(img_h),
+        .img_w(img_w), .img_h(img_h), .mode(mode),
         .clr(clr), .clr_done(clr_done), .clr_busy(clr_busy),
         .o_rdy(o_rdy), .o_we(o_we), .o_x(o_x), .o_y(o_y), .o_rgb(o_rgb),
         .o_k(o_k)
@@ -123,6 +124,29 @@ module tb_bmp_scale;
         end
     endtask
 
+    // 每轴不同缩放指数的检查（STRETCH: kx!=ky）
+    task chk_pix2(input integer dx, input integer dy,
+                  input integer kkx, input integer kky,
+                  input integer xo, input integer yo);
+        integer sx, sy;
+        reg [15:0] exp_c;
+        begin
+            sx = (dx - xo) << kkx;
+            sy = (dy - yo) << kky;
+            exp_c = {sx[7:0], sy[7:0]};
+            if (!seen[dy*640 + dx]) begin
+                err_total = err_total + 1;
+                if (err_total < 12)
+                    $display("  [ERR] (%0d,%0d) 没有输出", dx, dy);
+            end else if (cap[dy*640 + dx] !== exp_c) begin
+                err_total = err_total + 1;
+                if (err_total < 12)
+                    $display("  [ERR] (%0d,%0d) 得到 %04h 期望 %04h (源 %0d,%0d)",
+                             dx, dy, cap[dy*640 + dx], exp_c, sx, sy);
+            end
+        end
+    endtask
+
     task chk_empty(input integer dx, input integer dy);
         begin
             if (seen[dy*640 + dx]) begin
@@ -185,6 +209,37 @@ module tb_bmp_scale;
         chk_empty(79, 104);
         chk_empty(80, 104);
 
+        // ---------- 用例 5：FILL 1280x720 -> 1:1 中心裁切 ----------
+        //   kx=ky=0, ox=(640-1280)/2=-320, oy=(480-720)/2=-120
+        //   目标(dx,dy) 取源 (dx+320, dy+120)，正好铺满、四边各裁 320/120
+        $display("[case5] FILL 1280x720 -> 1:1 中心裁切 640x480");
+        mode = 2'd1;
+        clear_cap;
+        send_img(1280, 720);
+        if (o_k !== 3'd0) begin err_total = err_total + 1; $display("  [ERR] kx=%0d 应为 0", o_k); end
+        if (o_cnt !== 640*480) begin err_total = err_total + 1; $display("  [ERR] 输出 %0d 像素，应为 %0d", o_cnt, 640*480); end
+        chk_pix(0,   0,   0, -320, -120);
+        chk_pix(639, 479, 0, -320, -120);
+        chk_pix(320, 240, 0, -320, -120);
+        chk_pix(1,   1,   0, -320, -120);
+
+        // ---------- 用例 6：STRETCH 1280x720 -> 宽度压到 640、纵向裁切 ----------
+        //   kx=1(1280>>1=640), ky=0, ox=0, oy=(480-720)/2=-120
+        //   目标(dx,dy) 取源 (2dx, dy+120)
+        $display("[case6] STRETCH 1280x720 -> 640x480 铺满(纵向裁切)");
+        mode = 2'd2;
+        clear_cap;
+        send_img(1280, 720);
+        if (o_k !== 3'd1) begin err_total = err_total + 1; $display("  [ERR] kx=%0d 应为 1", o_k); end
+        if (o_cnt !== 640*480) begin err_total = err_total + 1; $display("  [ERR] 输出 %0d 像素，应为 %0d", o_cnt, 640*480); end
+        chk_pix2(0,   0,   1, 0, 0, -120);
+        chk_pix2(639, 479, 1, 0, 0, -120);
+        chk_pix2(320, 240, 1, 0, 0, -120);
+        chk_pix2(1,   1,   1, 0, 0, -120);
+
+        // 回到 FIT 再清屏
+        mode = 2'd0;
+
         // ---------- 用例 4：清屏 ----------
         $display("[case4] 清屏 640x480");
         clear_cap;
@@ -208,7 +263,7 @@ module tb_bmp_scale;
     end
 
     initial begin
-        #200_000_000;                   // 兜底超时 200ms
+        #600_000_000;                   // 兜底超时 600ms（6 组用例共约 500 万拍）
         $display("[FAIL] timeout, o_cnt=%0d", o_cnt);
         $finish;
     end

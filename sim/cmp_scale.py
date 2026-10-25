@@ -39,20 +39,45 @@ def src_px(d, off, w, h, stride, top_down, x, y):
 
 
 def calc_k(w, h):
+    """FIT：两轴同一个 k，使整幅图塞进框"""
     for k in range(5):
         if (w >> k) <= DW and (h >> k) <= DH:
             return k
     return 4
 
 
+def calc_kw(w):
+    """STRETCH：只看宽度"""
+    for k in range(5):
+        if (w >> k) <= DW:
+            return k
+    return 4
+
+
+def axes(w, h, mode):
+    """返回 (kx, ky)，与 bmp_scale.v 的选择逻辑一致"""
+    if mode == 0:
+        k = calc_k(w, h)
+        return k, k
+    if mode == 1:
+        return 0, 0
+    return calc_kw(w), 0
+
+
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "sim", "scale_in.bmp")
+    mode = 0
+    args = [a for a in sys.argv[1:]]
+    if args and args[0].startswith("--mode="):
+        mode = int(args[0].split("=")[1])
+        args = args[1:]
+    src = args[0] if args else os.path.join(ROOT, "sim", "scale_in.bmp")
     raw = os.path.join(ROOT, "sim", "scale_out.raw")
 
     d, off, w, h, stride, top_down = load_bmp(src)
-    k = calc_k(w, h)
-    w2, h2 = w >> k, h >> k
-    xoff, yoff = max(0, (DW - w2) // 2), max(0, (DH - h2) // 2)
+    kx, ky = axes(w, h, mode)
+    w2, h2 = w >> kx, h >> ky
+    # 有符号居中偏移（源比框大时为负 -> 裁切），与 RTL 的 >>> 1 一致
+    xoff, yoff = (DW - w2) // 2, (DH - h2) // 2
 
     data = open(raw, "rb").read()
     assert len(data) == DW * DH * 2, "raw 大小 %d 不对" % len(data)
@@ -65,7 +90,7 @@ def main():
             got = data[o] | (data[o + 1] << 8)
             sx, sy = dx - xoff, dy - yoff
             if 0 <= sx < w2 and 0 <= sy < h2:
-                exp = src_px(d, off, w, h, stride, top_down, sx << k, sy << k)
+                exp = src_px(d, off, w, h, stride, top_down, sx << kx, sy << ky)
             else:
                 exp = 0
             if got != exp:
@@ -73,8 +98,9 @@ def main():
                 rowbad[dy] += 1
 
     tot = DW * DH
-    print("源图 %dx%d  k=%d  显示 %dx%d  偏移 (%d,%d)"
-          % (w, h, k, w2, h2, xoff, yoff))
+    mname = {0: "FIT", 1: "FILL", 2: "STRETCH"}.get(mode, "?")
+    print("源图 %dx%d  mode=%d(%s)  kx=%d ky=%d  显示 %dx%d  偏移 (%d,%d)"
+          % (w, h, mode, mname, kx, ky, w2, h2, xoff, yoff))
     print("像素 %d  错 %d  = %.2f%% ok" % (tot, bad, 100.0 * (tot - bad) / tot))
     for dy in list(range(0, 8)) + list(range(max(0, yoff - 2), yoff + 3)) + [DH - 1]:
         if 0 <= dy < DH:
@@ -90,7 +116,8 @@ def main():
                 o = (dy * DW + dx) * 2
                 v = data[o] | (data[o + 1] << 8)
                 px[dx, dy] = (((v >> 11) & 31) << 3, ((v >> 5) & 63) << 2, (v & 31) << 3)
-        out = os.path.join(ROOT, "sim", "scale_out.png")
+        out = os.path.join(ROOT, "sim",
+                           "scale_out.png" if mode == 0 else "scale_mode%d.png" % mode)
         im.save(out)
         print("图像: %s" % out)
     except ImportError:

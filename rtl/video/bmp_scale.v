@@ -1,23 +1,27 @@
 // ============================================================================
-//  bmp_scale.v —— BMP 自适应缩放（2^k 整数缩放，保持宽高比）
+//  bmp_scale.v —— BMP 自适应缩放（整数缩放 + 三种显示模式）
 //
-//  解决的问题：帧缓存里的图片区固定 640x480，原来任何非 640x480 的图都是
-//  左上角对齐 + 被裁掉一部分（1280x720 的图只显示左上 1/4）。
+//  帧缓存里的图片区固定 640x480。本模块把任意尺寸的 BMP 映射进这个框：
 //
-//  方案：2 的整数次幂缩放 + 居中。
-//    - 选最小的 k∈[0,4]，使 (w>>k) <= 640 且 (h>>k) <= 480
-//      1280x720 -> k=1 -> 640x360；1920x1080 -> k=2 -> 480x270；640x480 -> k=0 直通
-//    - 横向：源列号低 k 位为 0 的像素才输出，目标列 = (sx>>k) + xoff
-//    - 纵向：源行号低 k 位为 0 的行才输出，目标行 = (sy>>k) + yoff
-//      （bmp_decode 已经把自底向上的行序翻成显示序，这里只按 o_sy 采样）
-//    - 居中：xoff=(640-w>>k)/2, yoff=(480-h>>k)/2，全是移位，不需要除法
+//   mode = 0  FIT     等比 2^k 缩小 + 居中，整幅图可见（可能有黑边）
+//           1280x720 -> 640x360 居中，上下各 60 行黑边
+//   mode = 1  FILL    1:1 中心裁切，铺满整个框（四边可能被裁掉）
+//           1280x720 -> 取中间 640x480 区域，放大填满画面
+//   mode = 2  STRETCH 水平缩到刚好铺满宽度，垂直 1:1 中心裁切
+//           1280x720 -> 整幅宽度压到 640，纵向取中间 480 行（无黑边）
 //
-//  为什么必须做"清屏"：缩放后图片往往铺不满 640x480（如 640x360 上下各留 60 行），
-//  不写那些行的话会残留上一张图的内容。清屏把整个框写成黑色，跑一次 153600 字。
+//  实现：每轴独立的 2^k 缩放指数 + 有符号居中偏移（负偏移 = 裁切）。
+//    横向：源列号低 kx 位为 0 才输出，目标列 = xoff + (sx>>kx)
+//    纵向：源行号低 ky 位为 0 才输出，目标行 = yoff + (sy>>ky)
+//    越界的目标坐标直接不输出（对负偏移即裁切）
+//  全程移位 + 有符号加法，无除法/无乘法/无行缓存 -> 不占 BRAM、不反压。
 //
-//  不需要行缓存：纵向只做"隔行取"（缩小），不做"插行"（放大），
-//  所以本模块是纯流水的，不占 BRAM，也不引入反压。
-//  代价：小于 640x480 的图按原尺寸 1:1 居中显示，不放大。
+//  限制：放大做不到。纵向插行需要行缓存（640x16bit x 2 行 ≈ 2 块 M9K），
+//        而这块板 BRAM 余量紧（曾因读 FIFO 加深导致布线失败），故不做。
+//        所以小于 640x480 的图在 FILL/STRETCH 下仍是 1:1 居中。
+//
+//  为什么必须做"清屏"：缩放后图片往往铺不满 640x480，
+//  不写那些行会残留上一张图的内容。清屏把整个框写成黑色，跑一次 153600 字。
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -35,7 +39,7 @@ module bmp_scale #(
     input  wire [15:0] s_rgb,
     input  wire [15:0] img_w,          // 表头解析出的尺寸（hdr 后有效）
     input  wire [15:0] img_h,
-    input  wire [1:0]  k_extra,        // 菜单"缩放"：在自动 2^k 之上再缩小 2^k（0/1/2）
+    input  wire [1:0]  mode,           // 0=FIT 1=FILL 2=STRETCH（菜单"缩放"）
 
     // ---------------- 清屏 ----------------
     input  wire        clr,            // 电平；需先拉低一次才能再次触发
@@ -49,58 +53,74 @@ module bmp_scale #(
     output reg  [11:0] o_y,
     output reg  [15:0] o_rgb,
 
-    output wire [2:0]  o_k             // 当前缩放级别（调试用）
+    output wire [2:0]  o_k             // 当前水平缩放级别（调试用）
 );
 
-    // ------------------------------------------------------------------
-    // 选 k：最小的、能把整幅图塞进框里的 2^k 缩小
-    //   w=0（还没解析到表头）时 k=0，不会输出任何像素
-    // ------------------------------------------------------------------
-    reg [2:0] k;
-    always @(*) begin
-        if      ((img_w <= DW) && (img_h <= DH))
-            k = 3'd0;
-        else if (({1'b0, img_w[15:1]} <= DW) && ({1'b0, img_h[15:1]} <= DH))
-            k = 3'd1;
-        else if (({2'b00, img_w[15:2]} <= DW) && ({2'b00, img_h[15:2]} <= DH))
-            k = 3'd2;
-        else if (({3'b000, img_w[15:3]} <= DW) && ({3'b000, img_h[15:3]} <= DH))
-            k = 3'd3;
-        else
-            k = 3'd4;
-    end
-
-    // 菜单缩放：自动 k 再加 k_extra，最大 4（1/16）
-    wire [3:0] k_sum = {1'b0, k} + {2'b00, k_extra};
-    wire [2:0] k_eff = (k_sum > 4'd4) ? 3'd4 : k_sum[2:0];
-
-    assign o_k = k_eff;
-
-    wire [15:0] w2 = img_w >> k_eff;
-    wire [15:0] h2 = img_h >> k_eff;
-
-    localparam [15:0] DWP = DW;      // integer 参数不能直接位选，先转成位宽明确的常量
+    localparam [15:0] DWP = DW;
     localparam [15:0] DHP = DH;
 
-    // 居中偏移；w2 仍大于 DW 时（超大图 k 被截到 4）退回 0，靠裁切兜底
-    wire [11:0] xoff = (w2 >= DWP) ? 12'd0 : ((DWP - w2) >> 1);
-    wire [11:0] yoff = (h2 >= DHP) ? 12'd0 : ((DHP - h2) >> 1);
+    // ------------------------------------------------------------------
+    // 缩放指数选择
+    // ------------------------------------------------------------------
+    wire [15:0] w1 = img_w >> 1, w2 = img_w >> 2, w3 = img_w >> 3, w4 = img_w >> 4;
+    wire [15:0] h1 = img_h >> 1, h2 = img_h >> 2, h3 = img_h >> 3, h4 = img_h >> 4;
+
+    // FIT：两轴同一个 k，保证整幅图都塞进框
+    reg [2:0] k_fit;
+    always @(*) begin
+        if      ((img_w <= DWP) && (img_h <= DHP)) k_fit = 3'd0;
+        else if ((w1     <= DWP) && (h1     <= DHP)) k_fit = 3'd1;
+        else if ((w2     <= DWP) && (h2     <= DHP)) k_fit = 3'd2;
+        else if ((w3     <= DWP) && (h3     <= DHP)) k_fit = 3'd3;
+        else                                         k_fit = 3'd4;
+    end
+
+    // STRETCH：只看宽度，缩到宽度刚好 <= 框宽
+    reg [2:0] k_w;
+    always @(*) begin
+        if      (img_w <= DWP) k_w = 3'd0;
+        else if (w1     <= DWP) k_w = 3'd1;
+        else if (w2     <= DWP) k_w = 3'd2;
+        else if (w3     <= DWP) k_w = 3'd3;
+        else                    k_w = 3'd4;
+    end
+
+    wire [2:0] kx = (mode == 2'd0) ? k_fit : ((mode == 2'd2) ? k_w : 3'd0);
+    wire [2:0] ky = (mode == 2'd0) ? k_fit : 3'd0;
+
+    assign o_k = kx;
+
+    wire [15:0] ws = img_w >> kx;      // 缩放后宽
+    wire [15:0] hs = img_h >> ky;      // 缩放后高
+
+    // 居中偏移（有符号）：源比框大时为负 -> 裁切
+    wire signed [12:0] ox_s = ($signed({1'b0, DWP}) - $signed({1'b0, ws})) >>> 1;
+    wire signed [12:0] oy_s = ($signed({1'b0, DHP}) - $signed({1'b0, hs})) >>> 1;
 
     // 采样掩码：低 k 位为 0 才输出（k=4 时 1<<4 在 4 位里回绕成 0，0-1=15，正确）
-    wire [3:0] kmask = (k_eff == 3'd0) ? 4'd0 : ((4'd1 << k_eff) - 4'd1);
+    wire [3:0] kmask_x = (kx == 3'd0) ? 4'd0 : ((4'd1 << kx) - 4'd1);
+    wire [3:0] kmask_y = (ky == 3'd0) ? 4'd0 : ((4'd1 << ky) - 4'd1);
 
-    wire       sel_col = ((s_sx[3:0] & kmask) == 4'd0);
-    wire       sel_row = ((s_sy[3:0] & kmask) == 4'd0);
+    wire sel_col = ((s_sx[3:0] & kmask_x) == 4'd0);
+    wire sel_row = ((s_sy[3:0] & kmask_y) == 4'd0);
+
+    // 目标坐标（有符号）+ 越界裁切
+    wire signed [12:0] tx_s = $signed({1'b0, (s_sx >> kx)}) + ox_s;
+    wire signed [12:0] ty_s = $signed({1'b0, (s_sy >> ky)}) + oy_s;
+
+    wire in_x = (tx_s >= 13'sd0) && (tx_s < $signed({1'b0, DWP}));
+    wire in_y = (ty_s >= 13'sd0) && (ty_s < $signed({1'b0, DHP}));
+
+    wire px_ok = s_we & sel_col & sel_row & in_x & in_y;
 
     // ------------------------------------------------------------------
     // 清屏
-    //   clr_done 之后必须先把 clr 拉低一拍拍，避免上层还没反应过来就重跑一次
     // ------------------------------------------------------------------
     reg        clr_run;
     reg        clr_rearm;        // 1 = 等 clr 落低
     reg [11:0] cx, cy;
 
-    assign clr_busy = clr_run;
+    assign clr_busy  = clr_run;
     wire   clr_start = clr & ~clr_run & ~clr_rearm;
 
     // ------------------------------------------------------------------
@@ -148,10 +168,10 @@ module bmp_scale #(
                 clr_run <= 1'b1;
                 cx      <= 12'd0;
                 cy      <= 12'd0;
-            end else if (s_we && sel_col && sel_row) begin
+            end else if (px_ok) begin
                 o_we  <= 1'b1;
-                o_x   <= xoff + (s_sx >> k);
-                o_y   <= yoff + (s_sy >> k);
+                o_x   <= tx_s[11:0];
+                o_y   <= ty_s[11:0];
                 o_rgb <= s_rgb;
             end
         end

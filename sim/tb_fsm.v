@@ -48,6 +48,7 @@ module tb_fsm;
     reg  [19:0] rd_wipe;
     reg        img_changed;
     reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走淡出/淡入
+    reg  [1:0] dbg_scale  = 2'd0;   // 缩放模式（FSM 里做变化检测）
     reg  [7:0] fade_lvl;
     reg  [7:0] img_idx;
 
@@ -57,6 +58,7 @@ module tb_fsm;
     reg        clr_ok;          // 清屏完成标志（clr_done 只有 1 拍，必须锁存）
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
     reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
+    reg  [1:0]  scale_d;            // 上一次加载用的缩放模式（变了就重载当前图）
 
     integer shown_cnt;
     initial shown_cnt = 0;
@@ -75,6 +77,7 @@ module tb_fsm;
             wr_bank   <= 1'b0;
             fade_lvl  <= 8'd255;
             img_changed <= 1'b0;
+            scale_d   <= 2'd0;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
@@ -201,15 +204,29 @@ module tb_fsm;
                 LD_SHOW: begin
                     if (fade_lvl != 8'd255) fade_lvl <= 8'd255;
                     if (frame_top) hold_frm <= hold_frm + 16'd1;
-                    if (hold_frm >= HOLD_FRM[15:0]) begin
+
+                    // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
+                    // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
+                    // 否则用户会以为缩放坏了（上板反馈过“缩放无法使用”）。
+                    if (dbg_scale != scale_d) begin
+                        scale_d   <= dbg_scale;
+                        if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
+                        sc_clr    <= 1'b1;
+                        clr_ok    <= 1'b0;
+                        clr_wdog  <= 26'd0;
+                        fin_dly   <= 13'd0;
+                        hold_frm  <= 16'd0;
+                        ld_st     <= LD_CLEAR;
+                    end else if (hold_frm >= HOLD_FRM[15:0]) begin
                         img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
                                                                      : (img_idx + 8'd1);
+                        scale_d   <= dbg_scale;
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
                         if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
-                        clr_wdog  <= 24'd0;
+                        clr_wdog  <= 26'd0;
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end

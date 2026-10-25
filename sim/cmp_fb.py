@@ -1,5 +1,6 @@
-import sys
-p='fb_sdram.ppm'
+import sys, os
+HERE = os.path.dirname(os.path.abspath(__file__))
+p=os.path.join(HERE,'fb_sdram.ppm')
 f=open(p,'rb')
 assert f.readline().strip()==b'P6'
 w,h=map(int,f.readline().split())
