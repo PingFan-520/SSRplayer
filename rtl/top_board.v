@@ -723,6 +723,10 @@ module top_board #(
 
                 LD_SHOW: begin
                     if (fade_lvl != 8'd255) fade_lvl <= 8'd255;
+                    // 正常显示期间强制"不分界"：任何残留的 rd_wipe/rd_bank_new
+                    // 都会让下半帧从另一块 bank 取数（那正是"横缝 + 下半重复"的成因）
+                    rd_wipe     <= 20'd153600;
+                    rd_bank_new <= rd_bank;
                     if (frame_top) hold_frm <= hold_frm + 16'd1;
 
                     // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
@@ -783,7 +787,7 @@ module top_board #(
     top_osd_demo #(
         .HACTIVE(HACTIVE), .HTOTAL(HTOTAL), .HSA(HSA), .HBP(HBP), .HFP(HFP),
         .VACTIVE(VACTIVE), .VTOTAL(VTOTAL), .VSA(VSA), .VBP(VBP), .VFP(VFP),
-        .PX0(360), .PY0(110), .PW(560), .PH(500),
+        .PX0(360), .PY0(80), .PW(560), .PH(560),
         .HOLD_FRAMES(75),
         .KEY_CLK_HZ(37_500_000),
         .USE_EXT(1)

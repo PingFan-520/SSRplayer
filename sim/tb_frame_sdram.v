@@ -356,6 +356,7 @@ module tb_frame_sdram;
 
     integer fh, wxx, wyy, i, j, k, found = 0, cnt_w;
     integer ry, cx, idx, wbad;
+
     reg [15:0] p0, p1;
     reg [4:0] r5v, b5v;
     reg [5:0] g6v;

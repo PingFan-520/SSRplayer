@@ -41,7 +41,8 @@ module osd_menu #(
     output reg  [3:0]  cfg_contrast,
     output reg  [1:0]  cfg_scale,
     output reg         cfg_sub,
-    output reg  [3:0]  cfg_vol
+    output reg  [3:0]  cfg_vol,
+    output reg         cfg_meter     // 1 = 显示音频电平表
 );
 
     // ------------------------------------------------------------------
@@ -67,13 +68,16 @@ module osd_menu #(
     reg [1:0]  v_scale;
     reg        v_sub;
     reg [3:0]  v_vol;
+    reg        v_meter;
 
     // 当前光标项的取值
     wire [3:0] cur_val = (item == 3'd0) ? {2'b00, v_trans}   :
                          (item == 3'd1) ? v_bright            :
                          (item == 3'd2) ? v_contrast          :
                          (item == 3'd3) ? {2'b00, v_scale}    :
-                         (item == 3'd4) ? {3'b000, v_sub}     : v_vol;
+                         (item == 3'd4) ? {3'b000, v_sub}     :
+                         (item == 3'd5) ? v_vol               :
+                                          {3'b000, v_meter};
 
     assign menu_open = open;
     assign dbg_item  = item;
@@ -89,15 +93,16 @@ module osd_menu #(
             v_scale    <= 2'd0;
             v_sub      <= 1'b1;
             v_vol      <= 4'd6;
+            v_meter    <= 1'b1;
         end else begin
             if (key_menu)
                 open <= ~open;
 
             if (open) begin
                 if (key_up)
-                    item <= (item == 3'd0) ? 3'd5 : item - 3'd1;
+                    item <= (item == 3'd0) ? 3'd6 : item - 3'd1;
                 if (key_down)
-                    item <= (item == 3'd5) ? 3'd0 : item + 3'd1;
+                    item <= (item == 3'd6) ? 3'd0 : item + 3'd1;
 
                 if (key_ok) begin
                     case (item)
@@ -106,7 +111,8 @@ module osd_menu #(
                         3'd2: v_contrast <= (v_contrast >= 4'd10) ? 4'd0 : v_contrast + 4'd1;
                         3'd3: v_scale    <= (v_scale == 2'd2) ? 2'd0 : v_scale + 2'd1;
                         3'd4: v_sub      <= ~v_sub;
-                        default: v_vol   <= (v_vol >= 4'd10) ? 4'd0 : v_vol + 4'd1;
+                        3'd5: v_vol      <= (v_vol >= 4'd10) ? 4'd0 : v_vol + 4'd1;
+                        default: v_meter <= ~v_meter;
                     endcase
                 end
             end
@@ -121,6 +127,7 @@ module osd_menu #(
         cfg_scale    <= v_scale;
         cfg_sub      <= v_sub;
         cfg_vol      <= v_vol;
+        cfg_meter    <= v_meter;
     end
 
     reg [11:0] y_d;
@@ -144,7 +151,7 @@ module osd_menu #(
     wire in_border = in_panel &&
                      ((rx < 12'd2) || (rx >= PW - 2) || (ry < 12'd2) || (ry >= PH - 2));
 
-    wire row_band  = in_panel && (ry >= 12'd80) && (ry < 12'd464);
+    wire row_band  = in_panel && (ry >= 12'd80) && (ry < 12'd528);
     wire [2:0] ridx = (ry - 12'd80) >> 6;
     wire [11:0] wy  = ry - 12'd80 - {ridx, 6'b000000};
     wire row_tv     = (wy >= 12'd12) && (wy < 12'd44);
@@ -155,7 +162,9 @@ module osd_menu #(
                          (ridx == 3'd1) ? v_bright            :
                          (ridx == 3'd2) ? v_contrast          :
                          (ridx == 3'd3) ? {2'b00, v_scale}    :
-                         (ridx == 3'd4) ? {3'b000, v_sub}     : v_vol;
+                         (ridx == 3'd4) ? {3'b000, v_sub}     :
+                         (ridx == 3'd5) ? v_vol               :
+                                          {3'b000, v_meter};
 
     wire title_hv = (x >= PX0 + 32) && (x < PX0 + 160) && (y >= PY0 + 24) && (y < PY0 + 56);
     wire [11:0] tcx = x - (PX0 + 32);
@@ -167,7 +176,7 @@ module osd_menu #(
     wire [11:0] vcx = x - (PX0 + 300);
 
     wire hint_hv  = (x >= PX0 + 32) && (x < PX0 + 320) &&
-                    (y >= PY0 + PH - 40) && (y < PY0 + PH - 24);
+                    (y >= PY0 + PH - 28) && (y < PY0 + PH - 12);
     wire [11:0] hcx = x - (PX0 + 32);
 
     // ---- 底部滚动字幕条 ----
@@ -240,9 +249,17 @@ module osd_menu #(
                     2'd1: g_label = 6'd59;   // 幕
                     default: g_label = 6'd37;
                 endcase
-                default: case (i)
+                3'd5: case (i)
                     2'd0: g_label = 6'd60;   // 音
                     2'd1: g_label = 6'd61;   // 量
+                    default: g_label = 6'd37;
+                endcase
+                3'd6: case (i)               // VU（电平表开关）
+                    2'd0: g_label = 6'd21;   // V
+                    2'd1: g_label = 6'd20;   // U
+                    default: g_label = 6'd37;
+                endcase
+                default: case (i)
                     default: g_label = 6'd37;
                 endcase
             endcase
@@ -343,7 +360,7 @@ module osd_menu #(
                         default: g_val = (v == 4'd2) ? 6'd7 : 6'd37;
                     endcase
                 end
-                3'd4: begin                       // ON / OFF
+                3'd4, 3'd6: begin                 // ON / OFF（字幕 / VU）
                     case (i)
                         3'd0: g_val = 6'd14;                       // O
                         3'd1: g_val = v[0] ? 6'd13 : 6'd5;         // N / F
@@ -446,7 +463,7 @@ module osd_menu #(
             s0_text   = 1'b1;
             s0_glyph  = g_hint(hcx[8:4]);
             s0_fcol   = hcx[3:0];
-            s0_frow   = y - (PY0 + PH - 40);
+            s0_frow   = y - (PY0 + PH - 28);
             s0_tcolor = C_HINT;
         end else if (sub_on && sub_hv) begin
             s0_text   = 1'b1;

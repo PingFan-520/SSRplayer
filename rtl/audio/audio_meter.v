@@ -21,11 +21,11 @@
 `timescale 1ns / 1ps
 
 module audio_meter #(
-    parameter integer X0   = 500,     // 面板左上角（屏幕坐标）
-    parameter integer Y0   = 620,
-    parameter integer BARW = 8,       // 每根柱子占 8 像素（6 实 + 2 空）
-    parameter integer NBAR = 32,      // 柱子数
-    parameter integer MAXH = 96       // 柱区高度（像素）
+    parameter integer X0   = 384,     // 面板左上角（屏幕坐标）
+    parameter integer Y0   = 610,
+    parameter integer BARW = 16,      // 每根柱子占 16 像素（14 实 + 2 空）
+    parameter integer NBAR = 32,      // 柱子数（32 x 16 = 512 像素宽）
+    parameter integer MAXH = 104      // 柱区高度（像素）
 )(
     input  wire        clk,
     input  wire        rst,
@@ -80,8 +80,9 @@ module audio_meter #(
     wire [11:0] dy = y - Y0[11:0];
 
     // bars[0] 是最新的一列，画在最右边（示波器/瀑布图习惯）
-    wire [4:0]  bi    = 5'd31 - dx[7:3];
-    wire        ingap = (dx[2:0] >= 3'd6);      // 柱内 2 像素间隙
+    // BARW=16 -> 柱索引取 dx[8:4]，柱内 2 像素间隙（dx[3:0] >= 14）
+    wire [4:0]  bi    = 5'd31 - dx[8:4];
+    wire        ingap = (dx[3:0] >= 4'd14);
 
     wire [7:0]  lv = bars[bi];
     // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）
@@ -112,10 +113,19 @@ module audio_meter #(
         else              col = 24'h3355FF;     // 蓝
     end
 
-    always @(*) begin
-        on    = filled;
-        alpha = filled ? 4'd8 : 4'd0;
-        rgb   = col;
+    // 输出寄存一拍：上层用 xd3/yd3（比视频早一拍）算，寄存后正好与视频对齐。
+    // 这样"32:1 mux + 比较 + 颜色 case"不再和菜单混合串在一条组合路径上，
+    // 像素通路比加电平表之前还短（上板"画面撕裂"的一半原因是这条路径太长）。
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            on    <= 1'b0;
+            rgb   <= 24'd0;
+            alpha <= 4'd0;
+        end else begin
+            on    <= filled;
+            rgb   <= col;
+            alpha <= filled ? 4'd8 : 4'd0;
+        end
     end
 
 endmodule

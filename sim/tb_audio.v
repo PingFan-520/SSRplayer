@@ -53,7 +53,7 @@ module tb_audio;
     reg  [11:0] mx = 12'd0, my = 12'd0;
     reg         mfs = 1'b0;            // 帧首（推一列）
 
-    audio_meter #(.X0(500), .Y0(620), .BARW(8), .NBAR(32), .MAXH(96)) u_m (
+    audio_meter #(.X0(384), .Y0(610), .BARW(16), .NBAR(32), .MAXH(104)) u_m (
         .clk(clk), .rst(rst),
         .x(mx), .y(my),
         .frame_start(mfs),
@@ -200,33 +200,33 @@ module tb_audio;
         // level=255 -> 高度 0.625*255=159 被夹到 MAXH=96 -> 整列填满
         level = 8'd255;
         for (i = 0; i < 40; i = i + 1) push_col;      // 32 列全部填满
-        mx = 12'd500; my = 12'd620;      // 柱顶（dy=0）
-        #1; if (!m_on) begin $display("[FAIL] 满幅：柱顶未点亮"); errs = errs + 1; end
-        mx = 12'd503; my = 12'd715;      // 柱底（dy=95）
-        #1; if (!m_on) begin $display("[FAIL] 满幅：柱底未点亮"); errs = errs + 1; end
-        mx = 12'd506; my = 12'd700;      // dx[2:0]=6 -> 柱子间隙
-        #1; if (m_on) begin $display("[FAIL] 柱子间隙不该点亮"); errs = errs + 1; end
-        mx = 12'd500; my = 12'd610;      // 面板上方（菜单区）
-        #1; if (m_on) begin $display("[FAIL] 面板外不该点亮"); errs = errs + 1; end
-        mx = 12'd760; my = 12'd680;      // 面板右侧（x 边界外）
-        #1; if (m_on) begin $display("[FAIL] 面板外(右)不该点亮"); errs = errs + 1; end
+        mx = 12'd387; my = 12'd610;      // 柱顶（dy=0）
+        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱顶未点亮"); errs = errs + 1; end
+        mx = 12'd387; my = 12'd713;      // 柱底（dy=103）
+        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱底未点亮"); errs = errs + 1; end
+        mx = 12'd398; my = 12'd680;      // dx=14 -> 柱子间隙
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 柱子间隙不该点亮"); errs = errs + 1; end
+        mx = 12'd387; my = 12'd600;      // 面板上方（图片区下缘）
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 面板外不该点亮"); errs = errs + 1; end
+        mx = 12'd898; my = 12'd680;      // 面板右侧（x 边界外，384+512=896）
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 面板外(右)不该点亮"); errs = errs + 1; end
 
         // level=64 -> 高度 0.625*64=40 -> thr=56；dy=95 亮、dy=40 灭
         level = 8'd64;
         for (i = 0; i < 40; i = i + 1) push_col;
-        mx = 12'd503; my = 12'd715;
-        #1; if (!m_on) begin $display("[FAIL] 低电平：柱底应点亮"); errs = errs + 1; end
-        mx = 12'd503; my = 12'd660;      // dy=40 < 56
-        #1; if (m_on) begin $display("[FAIL] 低电平：柱高应较低（dy=40 不该亮）"); errs = errs + 1; end
+        mx = 12'd387; my = 12'd713;
+        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 低电平：柱底应点亮"); errs = errs + 1; end
+        mx = 12'd387; my = 12'd650;      // dy=40 < 64
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 低电平：柱高应较低（dy=40 不该亮）"); errs = errs + 1; end
 
         // 颜色分段：顶部红、底部蓝
         level = 8'd255;
         for (i = 0; i < 40; i = i + 1) push_col;
-        mx = 12'd503; my = 12'd625;      // dy=5 -> 红
-        #1; if (m_rgb !== 24'hFF2A18) begin
+        mx = 12'd387; my = 12'd615;      // dy=5 -> 红
+        @(posedge clk); #1; if (m_rgb !== 24'hFF2A18) begin
             $display("[FAIL] 顶部颜色 %06h，应为红 FF2A18", m_rgb); errs = errs + 1; end
-        mx = 12'd503; my = 12'd710;      // dy=90 -> 蓝
-        #1; if (m_rgb !== 24'h3355FF) begin
+        mx = 12'd387; my = 12'd706;      // dy=96 -> 蓝
+        @(posedge clk); #1; if (m_rgb !== 24'h3355FF) begin
             $display("[FAIL] 底部颜色 %06h，应为蓝 3355FF", m_rgb); errs = errs + 1; end
         $display("[ok] 电平表几何/间隙/颜色分段正确");
 
@@ -240,12 +240,12 @@ module tb_audio;
             end
             level = 8'd0;
             fd = $fopen("meter_out.ppm", "wb");
-            $fwrite(fd, "P6\n256 96\n255\n");
-            for (by = 0; by < 96; by = by + 1) begin
-                for (bx = 0; bx < 256; bx = bx + 1) begin
-                    mx = 500 + bx;
-                    my = 620 + by;
-                    #1;
+            $fwrite(fd, "P6\n512 104\n255\n");
+            for (by = 0; by < 104; by = by + 1) begin
+                for (bx = 0; bx < 512; bx = bx + 1) begin
+                    mx = 384 + bx;
+                    my = 610 + by;
+                    @(posedge clk); #1;
                     cc = m_on ? m_rgb : 24'h000000;
                     $fwrite(fd, "%c%c%c", cc[23:16], cc[15:8], cc[7:0]);
                 end

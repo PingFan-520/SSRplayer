@@ -18,6 +18,7 @@ module cfg_latch (
     input  wire [1:0] in_scale,
     input  wire       in_sub,
     input  wire [3:0] in_vol,
+    input  wire       in_meter,
 
     output reg  [1:0] trans,
     output reg  [3:0] bright,
@@ -25,6 +26,7 @@ module cfg_latch (
     output reg  [1:0] scale,
     output reg        sub,
     output reg  [3:0] vol,
+    output reg        meter,
 
     output reg  [3:0] ver              // 参数版本号，调试用
 );
@@ -36,6 +38,7 @@ module cfg_latch (
             contrast <= 4'd10;
             scale    <= 2'd0;
             sub      <= 1'b1;
+            meter    <= 1'b1;
             vol      <= 4'd6;
             ver      <= 4'd0;
         end else if (commit) begin
@@ -44,6 +47,7 @@ module cfg_latch (
             contrast <= in_contrast;
             scale    <= in_scale;
             sub      <= in_sub;
+            meter    <= in_meter;
             vol      <= in_vol;
             ver      <= ver + 4'd1;
         end

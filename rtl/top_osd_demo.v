@@ -120,7 +120,7 @@ module top_osd_demo #(
     wire [1:0]  cfg_trans;
     wire [3:0]  cfg_bright, cfg_contrast, cfg_vol;
     wire [1:0]  cfg_scale;
-    wire        cfg_sub, cfg_commit;
+    wire        cfg_sub, cfg_meter, cfg_commit;
 
     osd_menu #(
         .HACTIVE(HACTIVE), .VACTIVE(VACTIVE),
@@ -137,7 +137,8 @@ module top_osd_demo #(
         .dbg_item(dbg_item), .dbg_val(dbg_val),
         .cfg_commit(cfg_commit),
         .cfg_trans(cfg_trans), .cfg_bright(cfg_bright), .cfg_contrast(cfg_contrast),
-        .cfg_scale(cfg_scale), .cfg_sub(cfg_sub), .cfg_vol(cfg_vol)
+        .cfg_scale(cfg_scale), .cfg_sub(cfg_sub), .cfg_vol(cfg_vol),
+        .cfg_meter(cfg_meter)
     );
 
     // ------------------------------------------------------------------
@@ -147,14 +148,16 @@ module top_osd_demo #(
     wire [3:0] ef_bright, ef_contrast, ef_vol;
     wire [1:0] ef_scale;
     wire       ef_sub;
+    wire       ef_meter;
     wire [3:0] cfg_ver;
 
     cfg_latch u_cfg (
         .clk(clk), .rst(rst), .commit(cfg_commit),
         .in_trans(cfg_trans), .in_bright(cfg_bright), .in_contrast(cfg_contrast),
         .in_scale(cfg_scale), .in_sub(cfg_sub), .in_vol(cfg_vol),
+        .in_meter(cfg_meter),
         .trans(ef_trans), .bright(ef_bright), .contrast(ef_contrast),
-        .scale(ef_scale), .sub(ef_sub), .vol(ef_vol),
+        .scale(ef_scale), .sub(ef_sub), .vol(ef_vol), .meter(ef_meter),
         .ver(cfg_ver)
     );
 
@@ -295,13 +298,13 @@ module top_osd_demo #(
     wire [3:0]  m_alpha;
 
     audio_meter #(
-        .X0(500), .Y0(620), .BARW(8), .NBAR(32), .MAXH(96)
+        .X0(384), .Y0(610), .BARW(16), .NBAR(32), .MAXH(104)
     ) u_meter (
         .clk(clk), .rst(rst),
-        .x(xd4), .y(yd4),
+        .x(xd3), .y(yd3),              // 早一拍，模块内部寄存后与视频对齐
         .frame_start(frame_tick),      // 每帧只推一列 -> 帧内绝对稳定
         .level(aud_lvl),
-        .enable(aud_meter_en),
+        .enable(aud_meter_en & ef_meter & ~menu_open),
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );
 
