@@ -21,7 +21,7 @@ module tb_fsm;
     parameter integer HOLD_FRM = 3;     // 让轮播快速走完整轮
     parameter integer IMG_NUM  = 8;
     parameter integer IMG_Y0   = 120;
-    parameter integer USE_DBL  = 0;      // 与 top_board 一致（0=单缓冲）
+    parameter integer USE_DBL  = 1;      // 与 top_board 一致（0=单缓冲）
     parameter integer V_OFF    = 25;
 
     // ---- 激励 ----

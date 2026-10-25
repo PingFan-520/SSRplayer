@@ -354,6 +354,18 @@ module tb_frame_win;
 
     integer fh, wxx, wyy, i, j, k, found = 0, cnt_w;
     integer ry, cx, idx, wbad;
+
+    // 写路径计数器：看 153600 字在哪一步丢的
+    integer c_tk3 = 0, c_wd3 = 0, c_tl3 = 0, c_bs3 = 0, c_pp3 = 0;
+    reg     bsd3 = 1'b0;
+    always @(posedge mem_clk) begin
+        if (u_fb.wd_take) c_tk3 = c_tk3 + 1;
+        if (u_fb.wd_drop) c_wd3 = c_wd3 + 1;
+        if (u_fb.tail_drop) c_tl3 = c_tl3 + 1;
+        if (u_fb.wpop) c_pp3 = c_pp3 + 1;
+        bsd3 <= u_fb.bsend;
+        if (u_fb.bsend && !bsd3) c_bs3 = c_bs3 + 1;
+    end
     reg [15:0] p0, p1;
     reg [4:0] r5v, b5v;
     reg [5:0] g6v;
@@ -473,6 +485,17 @@ module tb_frame_win;
             end
         end
         $display("[res] SDRAM content match : %0d/%0d wrong", wbad, 153600);
+        $display("[wr] take=%0d pop=%0d drop=%0d tail=%0d burst=%0d (期望 take=153600 burst=38400)",
+                 c_tk3, c_pp3, c_wd3, c_tl3, c_bs3);
+        // 逐行坏字数
+        for (ry = 0; ry < 480; ry = ry + 1) begin
+            wbad = 0;
+            for (cx = 0; cx < 320; cx = cx + 1) begin
+                idx = ry*320 + cx;
+                if (u_chip.Bank0[idx] === 32'hxxxxxxxx) wbad = wbad + 1;
+            end
+            if (wbad != 0) $display("[badrow] %0d : 未写入 %0d/320", ry, wbad);
+        end
 
         // 逐行统计：y=120..135 每行有多少字落盘（每行 320 字，索引 y*640+160..+479）
         for (k = 0; k < 16; k = k + 1) begin

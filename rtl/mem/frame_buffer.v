@@ -196,7 +196,7 @@ module frame_buffer #(
     // pop -> valid 的两拍链路取字，再攒 4 个字连续发 4 拍。
     // 前提：写入起始地址 4 字对齐（640x480 居中 -> x=320 -> word 160）。
     // ==================================================================
-    reg         wpop;
+    wire        wpop;          // = wf_rd，仅作观测名
     reg         wvld;
     reg  [2:0]  bn;
     reg  [31:0] bb0, bb1, bb2, bb3;
@@ -256,7 +256,13 @@ module frame_buffer #(
     wire        wd_take    = wvld & can_accept & wd_useful;
     wire        wd_drop    = wvld & can_accept & ~wd_useful;   // 不对齐/不连续，丢弃整组
 
-    assign wf_rd = wpop;
+    reg  wpend, wfly;          // 待取字 / 已发 rd_en 在途
+
+    // 发 rd_en 的条件：写窗口内 + FIFO 非空 + 槽位空（无待取字、无在途字）。
+    // 用组合逻辑直接把 rd_en 打出去，再用 wfly 记住"已发、数据未回"，
+    // 这样两拍之内绝不会发第二次 rd_en（之前用寄存器版 wpop 会晚一拍，导致连发两次）。
+    assign wf_rd = wr_win_m & ~wf_empty & ~wpend & ~wfly;
+    assign wpop  = wf_rd;
 
     wire [31:0] bsel = (bi == 2'd0) ? bb0 :
                        (bi == 2'd1) ? bb1 :
@@ -266,14 +272,38 @@ module frame_buffer #(
     assign app_wr_addr = baddr + {19'd0, bi};
     assign app_wr_din  = bsel;
 
-    // wvld 直接来自 FIFO 的 rd_valid（与 dout 同拍），不能用 wpop 再生：
-    // FIFO 接近空时 rd_empty 同步滞后，只看 wpop 会把同一个字取两次。
-    always @(*) wvld = wf_rvld;
+    // ------------------------------------------------------------------
+    // 取字握手：电平有效 + "收下才清"
+    //
+    //   原来 wvld 直接接 wf_rvld，是**1 拍宽的脉冲**。只要这一拍
+    //   can_accept=0（正在发 burst / bgap 期间 / 组已满），这个字就永久丢掉，
+    //   而且下一拍还会再取一次 —— 实测 pop=306564 而 take 只有 153280，
+    //   丢 320 字（4 个半行，每两个 burst 缺一个）。
+    //   单缓冲时窗口全开、握手几乎不撞车，所以一直没暴露。
+    //
+    //   afifo 的 rd_data 在下次 rd_en 之前一直保持，所以"待取字"可以用电平表示，
+    //   等组装器收下再清；同时用 wfly 标记"已发 rd_en、数据未回"。
+    // ------------------------------------------------------------------
+    // （wpend/wfly 的声明提前到 wf_rd 之前，见上）
 
     always @(posedge clk_mem or posedge rst_mem) begin
-        if (rst_mem) wpop <= 1'b0;
-        else         wpop <= wr_win_m & ~wf_empty & ~wvld & can_accept;
+        if (rst_mem) begin
+            wpend <= 1'b0;
+            wfly  <= 1'b0;
+        end else begin
+            if (wf_rvld)
+                wpend <= 1'b1;                    // 数据回来了，挂着等收
+            else if (wvld && can_accept)
+                wpend <= 1'b0;                    // 被收下（或按规则丢弃）
+
+            // 发过 rd_en 就置"在途"，数据回来清掉
+            wfly <= wf_rd;
+        end
     end
+
+    always @(*) wvld = wpend;
+
+    // （wpop 现在是 wf_rd 的别名，不再需要寄存器版本）
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin
@@ -492,6 +522,8 @@ module frame_buffer #(
 
     // 写侧是否彻底排空：换 bank 之前必须等到这里，
     // 否则最后几个字会写进下一块缓冲（bn/bsend/wvld 在后面声明，故放在模块末尾）
-    assign wr_idle = wf_empty & ~bsend & (bn == 3'd0) & ~wvld;
+    // 还要算上"已发 rd_en、数据未回"（wfly）：这种字随后到达时，
+    // word_addr 用的是**当时的** wr_bank，若此刻刚好换 bank，它会写进新 bank。
+    assign wr_idle = wf_empty & ~bsend & (bn == 3'd0) & ~wvld & ~wfly;
 
 endmodule
