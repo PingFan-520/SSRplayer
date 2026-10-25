@@ -45,7 +45,7 @@ module tb_bmp_scale_chain;
     bmp_scale #(.DW(DW), .DH(DH)) u_scale (
         .clk(clk), .rst(rst),
         .s_we(o_we), .s_sx(o_sx), .s_sy(o_sy), .s_rgb(o_rgb),
-        .img_w(img_w), .img_h(img_h),
+        .img_w(img_w), .img_h(img_h), .k_extra(2'd0),
         .clr(1'b0), .clr_done(), .clr_busy(),
         .o_rdy(1'b1),
         .o_we(sc_we), .o_x(sc_x), .o_y(sc_y), .o_rgb(sc_rgb), .o_k(sc_k)

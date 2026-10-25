@@ -46,11 +46,13 @@ module top_osd_demo #(
     output wire [3:0]  dbg_val,
     output wire [7:0]  dbg_prog,
     output wire [1:0]  dbg_effect,
+    output wire [1:0]  dbg_scale,
 
     output wire [5:0]  seg_sel,
     output wire [7:0]  seg_data,
 
     input  wire        img_changed,  // 换图脉冲（双缓冲换 bank 时给一拍）
+    input  wire [7:0]  fade_lvl,     // 转场淡入淡出：255=正常亮度 0=全黑
     input  wire [15:0] ext_rgb,      // 外部视频（RGB565，黑边=0）
     output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
     output wire [11:0] raw_x,
@@ -191,10 +193,13 @@ module top_osd_demo #(
     wire [23:0] src_b = USE_EXT ? base_a     : (trans_swap ? base_a : b_rgb);
 
     wire [23:0] trans_rgb;
+    wire [7:0] prog_use = USE_EXT ? fade_lvl : trans_prog;
+    wire [1:0] eff_use  = USE_EXT ? 2'd0     : ef_trans;   // USE_EXT 固定 FADE
+
     transition #(.HACTIVE(HACTIVE)) u_trans (
         .clk(clk), .rst(rst),
         .rgb_a(src_a), .rgb_b(src_b),
-        .x(act_x), .effect(ef_trans), .prog(trans_prog),
+        .x(act_x), .effect(eff_use), .prog(prog_use),
         .rgb_out(trans_rgb)
     );
 
@@ -202,12 +207,12 @@ module top_osd_demo #(
     // 亮度 / 对比度
     // ------------------------------------------------------------------
     wire [23:0] adj_rgb;
-    // USE_EXT（真实图片）：转场改由帧缓存做"整幅推入"（双 bank 分界），
-    // OSD 这一级必须直通，否则会再叠一次淡入 -> 中间出现黑场（上板踩过）。
-    wire [23:0] trans_use = USE_EXT ? base_a : trans_rgb;
-
+    // USE_EXT（真实图片播放）：用"淡出到黑 -> 淡入新图"的转场。
+    //   a 恒为黑、b 为图片，mix8 = b*fade_lvl/256：
+    //   fade_lvl=255 正常显示、=0 全黑。换 bank 发生在全黑那一刻，看不见。
+    //   原来的 A/B 交替（彩条）和推入分界都不再使用。
     param_apply u_param (
-        .rgb_in(trans_use),
+        .rgb_in(trans_rgb),
         .bright(ef_bright), .contrast(ef_contrast),
         .rgb_out(adj_rgb)
     );
@@ -273,6 +278,7 @@ module top_osd_demo #(
 
     assign dbg_prog   = trans_prog;
     assign dbg_effect = ef_trans;
+    assign dbg_scale  = ef_scale;
 
     assign raw_de = bg_de;
     assign raw_x  = act_x;

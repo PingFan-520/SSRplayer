@@ -200,9 +200,11 @@ module top_board #(
 
     reg         load_mode;
     reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
-    reg         rd_bank_new;        // 转场时"新图"所在的 bank
     wire [1:0]  dbg_effect;         // 菜单里选的转场特效（提前声明，FSM 要用）
-    reg  [19:0] rd_wipe;            // 转场分界（字索引）：< 它读旧 bank，>= 它读新 bank
+    wire [1:0]  dbg_scale;          // 菜单里选的缩放档位（给 bmp_scale）
+
+    // 淡入淡出转场：255=正常亮度，0=全黑。换 bank 发生在全黑那一刻，看不见。
+    reg  [7:0]  fade_lvl;
     reg         img_changed;        // 换图脉冲（给转场做淡入）
 
     // 图片区在屏幕上的位置（与 frame_buffer 的 IMG_X0/IMG_Y0 保持一致）
@@ -253,8 +255,8 @@ module top_board #(
         .rd_buf  (1'b0),
         .load_mode(load_mode),
         .rd_bank (rd_bank),
-        .rd_bank_new(rd_bank_new),
-        .rd_wipe (rd_wipe),
+        .rd_bank_new(rd_bank),          // 不再用分界推入：恒等于 rd_bank
+        .rd_wipe (20'd153600),          // 153600 -> 全部读 rd_bank
         .wr_bank (wr_bank),
         .wr_fifo_used(fb_wf_used),
         .wr_idle (fb_wr_idle),
@@ -391,6 +393,7 @@ module top_board #(
         .s_rgb    (bmp_rgb),
         .img_w    (bmp_w),
         .img_h    (bmp_h),
+        .k_extra  (dbg_scale),
 
         .clr      (sc_clr),
         .clr_done (sc_clr_done),
@@ -414,7 +417,8 @@ module top_board #(
                      LD_CLEAR = 3'd1,     // 把整个图片区写黑（缩放后留边不会残留上一张）
                      LD_ARM   = 3'd2,     // 换图后先让 img_idx 稳定
                      LD_LOAD  = 3'd3,
-                     LD_WIPE  = 3'd5,     // 整幅推入转场（新图从下往上推入）
+                     LD_FADE_OUT = 3'd5,  // 淡出到黑
+                     LD_FADE_IN  = 3'd6,  // 从黑淡入新图（换 bank 在两者之间完成）
                      LD_SHOW  = 3'd4;
 
     reg [2:0]  ld_st;
@@ -471,8 +475,7 @@ module top_board #(
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
-            rd_bank_new <= 1'b0;
-            rd_wipe   <= 20'd153600;     // 153600 = 全部读旧 bank（正常显示）
+            fade_lvl  <= 8'd255;
             img_changed <= 1'b0;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
@@ -549,22 +552,17 @@ module top_board #(
                             ld_wdog   <= 28'd0;
                             load_mode <= 1'b0;
                             hold_frm  <= 16'd0;
-                            // 菜单里选 CUT(3) 就硬切；其它特效走"整幅推入"。
-                            // FADE/SLIDE 需要同时读两块相同坐标，单读口做不到，
-                            // 所以统一映射成推入（视觉上也是明确的转场）。
+                            // 转场：淡出到黑 -> 换 bank（黑屏时切，看不见）-> 淡入新图。
+                            // 交叉淡化需要同时读新旧两个地址，单读口带宽不够，
+                            // 所以用"中间经过一帧全黑"的经典做法。
                             if (USE_DBL[0] && (dbg_effect != 2'd3)) begin
-                                // 不瞬间切换：新图先待在 rd_bank_new 里，
-                                // 由 LD_WIPE 每帧把分界往下推 48 行，10 帧推完。
-                                // 两张图同屏共存，中间没有黑场。
-                                rd_bank_new <= wr_bank;
-                                rd_wipe     <= 20'd153600;
-                                ld_st       <= LD_WIPE;
+                                fade_lvl <= 8'd224;      // 从接近满亮度开始往下降
+                                ld_st    <= LD_FADE_OUT;
                             end else begin
-                                rd_bank     <= USE_DBL[0] ? wr_bank : 1'b0;
-                                rd_bank_new <= USE_DBL[0] ? wr_bank : 1'b0;
-                                rd_wipe     <= 20'd153600;
-                                wr_bank     <= USE_DBL[0] ? ~wr_bank : 1'b0;
-                                ld_st       <= LD_SHOW;
+                                rd_bank  <= USE_DBL[0] ? wr_bank : 1'b0;
+                                wr_bank  <= USE_DBL[0] ? ~wr_bank : 1'b0;
+                                fade_lvl <= 8'd255;
+                                ld_st    <= LD_SHOW;
                             end
                         end else begin
                             fin_dly <= fin_dly + 13'd1;
@@ -575,30 +573,42 @@ module top_board #(
                 // 整幅推入：每帧把分界下移 15360 字（= 48 行），10 帧推完。
                 // 分界必须整 4 字对齐（15360 / 320 都是 4 的倍数），
                 // 这样 4 字 burst 绝不会跨 bank，控制器不会读到错位数据。
-                LD_WIPE: begin
+                // 淡出：每帧 -32，8 帧从 255 降到 0（约 0.27s）
+                LD_FADE_OUT: begin
                     if (frame_top) begin
-                        if (rd_wipe == 20'd0) begin
-                            // 分界已经推到底（整幅都是新图），下一帧收工。
-                            // 收工条件必须等 rd_wipe 真的到 0：
-                            // 若在 15360 就收工，顶部 48 行还停在旧图，下一帧会"跳"一下。
-                            rd_wipe  <= 20'd153600;     // 恢复常值
-                            rd_bank  <= rd_bank_new;    // 显示正式切到新图
-                            wr_bank  <= ~rd_bank_new;   // 下一张写另一块
+                        if (fade_lvl <= 8'd32) begin
+                            fade_lvl <= 8'd0;              // 全黑
+                            rd_bank  <= USE_DBL[0] ? wr_bank : 1'b0;
+                            wr_bank  <= USE_DBL[0] ? ~wr_bank : 1'b0;
+                            ld_st    <= LD_FADE_IN;        // 黑屏里换 bank，看不见
+                        end else begin
+                            fade_lvl <= fade_lvl - 8'd32;
+                        end
+                    end
+                end
+
+                // 淡入新图：每帧 +32，8 帧回到 255
+                LD_FADE_IN: begin
+                    if (frame_top) begin
+                        if (fade_lvl >= 8'd224) begin
+                            fade_lvl <= 8'd255;
                             hold_frm <= 16'd0;
                             ld_st    <= LD_SHOW;
-                        end else if (rd_wipe <= 20'd15360) begin
-                            rd_wipe <= 20'd0;           // 最后一步：整幅切到新图
                         end else begin
-                            rd_wipe <= rd_wipe - 20'd15360;
+                            fade_lvl <= fade_lvl + 8'd32;
                         end
                     end
                 end
 
                 LD_SHOW: begin
+                    if (fade_lvl != 8'd255) fade_lvl <= 8'd255;
                     if (frame_top) hold_frm <= hold_frm + 16'd1;
                     if (hold_frm >= HOLD_FRM[15:0]) begin
                         img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
                                                                      : (img_idx + 8'd1);
+                        // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
+                        // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
+                        if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
                         clr_wdog  <= 24'd0;
@@ -648,9 +658,10 @@ module top_board #(
         .rgb_out(rgb), .hs_out(hs), .vs_out(vs), .de_out(de),
         .x_out(x), .y_out(y),
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),
-        .dbg_prog(dbg_prog), .dbg_effect(dbg_effect),
+        .dbg_prog(dbg_prog), .dbg_effect(dbg_effect), .dbg_scale(dbg_scale),
         .seg_sel(seg_sel), .seg_data(seg_data),
         .img_changed(img_changed),
+        .fade_lvl(fade_lvl),
         .ext_rgb(fb_rgb),
         .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
         .dbg_ext(dbg_ext)

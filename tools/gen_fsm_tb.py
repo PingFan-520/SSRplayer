@@ -108,7 +108,8 @@ module tb_fsm;
     reg        rd_bank_new;
     reg  [19:0] rd_wipe;
     reg        img_changed;
-    reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走整幅推入
+    reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走淡出/淡入
+    reg  [7:0] fade_lvl;
     reg  [7:0] img_idx;
 
 %(DECLS)s
@@ -130,7 +131,7 @@ module tb_fsm;
           3'd2: n_arm   = n_arm + 1;
           3'd3: n_load  = n_load + 1;
           3'd4: begin n_show = n_show + 1; shown_cnt = shown_cnt + 1; end
-          3'd5: begin
+          3'd5, 3'd6: begin
               n_wipe = n_wipe + 1;
               if (ld_st != prev_st) wipe_cnt = wipe_cnt + 1;
           end
@@ -194,7 +195,7 @@ module tb_fsm;
                  n_wait, n_clear, n_arm, n_load, n_show);
         if (clr_cnt == 0) clr_cnt = 1;
         $display("[fsm] 清屏 %0d 次，平均 %0d 拍/次（期望约 3803）", clr_cnt, n_clear/clr_cnt);
-        $display("[fsm] 推入转场 %0d 次，平均 %0d 拍/次（期望约 11 帧 = 220000 拍）",
+        $display("[fsm] 淡出+淡入 %0d 次，平均 %0d 拍/次（期望约 18 帧 = 360000 拍）",
                  wipe_cnt, (wipe_cnt==0) ? 0 : n_wipe/wipe_cnt);
         if ((n_clear/clr_cnt) > 6000) begin
             $display("[FAIL] CLEAR 平均 %0d 拍，疑似死锁/走看门狗", n_clear/clr_cnt);

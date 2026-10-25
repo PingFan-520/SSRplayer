@@ -35,6 +35,7 @@ module bmp_scale #(
     input  wire [15:0] s_rgb,
     input  wire [15:0] img_w,          // 表头解析出的尺寸（hdr 后有效）
     input  wire [15:0] img_h,
+    input  wire [1:0]  k_extra,        // 菜单"缩放"：在自动 2^k 之上再缩小 2^k（0/1/2）
 
     // ---------------- 清屏 ----------------
     input  wire        clr,            // 电平；需先拉低一次才能再次触发
@@ -69,10 +70,14 @@ module bmp_scale #(
             k = 3'd4;
     end
 
-    assign o_k = k;
+    // 菜单缩放：自动 k 再加 k_extra，最大 4（1/16）
+    wire [3:0] k_sum = {1'b0, k} + {2'b00, k_extra};
+    wire [2:0] k_eff = (k_sum > 4'd4) ? 3'd4 : k_sum[2:0];
 
-    wire [15:0] w2 = img_w >> k;
-    wire [15:0] h2 = img_h >> k;
+    assign o_k = k_eff;
+
+    wire [15:0] w2 = img_w >> k_eff;
+    wire [15:0] h2 = img_h >> k_eff;
 
     localparam [15:0] DWP = DW;      // integer 参数不能直接位选，先转成位宽明确的常量
     localparam [15:0] DHP = DH;
@@ -82,7 +87,7 @@ module bmp_scale #(
     wire [11:0] yoff = (h2 >= DHP) ? 12'd0 : ((DHP - h2) >> 1);
 
     // 采样掩码：低 k 位为 0 才输出（k=4 时 1<<4 在 4 位里回绕成 0，0-1=15，正确）
-    wire [3:0] kmask = (k == 3'd0) ? 4'd0 : ((4'd1 << k) - 4'd1);
+    wire [3:0] kmask = (k_eff == 3'd0) ? 4'd0 : ((4'd1 << k_eff) - 4'd1);
 
     wire       sel_col = ((s_sx[3:0] & kmask) == 4'd0);
     wire       sel_row = ((s_sy[3:0] & kmask) == 4'd0);
