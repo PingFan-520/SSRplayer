@@ -105,6 +105,10 @@ module tb_fsm;
     reg        sc_clr;
     reg        load_mode;
     reg        rd_bank, wr_bank;
+    reg        rd_bank_new;
+    reg  [19:0] rd_wipe;
+    reg        img_changed;
+    reg  [1:0] dbg_effect;          // 0=FADE -> 走整幅推入
     reg  [7:0] img_idx;
 
 %(DECLS)s

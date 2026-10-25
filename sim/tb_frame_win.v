@@ -100,6 +100,9 @@ module tb_frame_win;
     reg        wr_pix_en  = 1'b0;
     reg [11:0] wr_pix_x   = 12'd0;
     reg [11:0] wr_pix_y   = 12'd0;
+    reg        rd_bank_t     = 1'b0;
+    reg        rd_bank_new_t = 1'b0;
+    reg [19:0] rd_wipe_t     = 20'd153600;
     reg [15:0] wr_pix_rgb = 16'd0;
 
     wire [15:0] fb_rgb;
@@ -138,7 +141,9 @@ module tb_frame_win;
         .y       (vcnt),          // 帧内行号 0..749，写窗口 = 前 25 行
         .rd_buf  (1'b0),
         .load_mode(load_mode),
-        .rd_bank (1'b0),
+        .rd_bank (rd_bank_t),
+        .rd_bank_new(rd_bank_new_t),
+        .rd_wipe (rd_wipe_t),
         .wr_bank (1'b0),
         .wr_fifo_used(),
         .rgb_out (fb_rgb),
@@ -355,6 +360,19 @@ module tb_frame_win;
     integer fh, wxx, wyy, i, j, k, found = 0, cnt_w;
     integer ry, cx, idx, wbad;
 
+    // 转场分界地址检查
+    reg        wk_en = 1'b0;
+    integer    wk_bad = 0, wk_chk = 0, wk_lo = 0, wk_hi = 0;
+    reg [20:0] wk_exp = 21'd0;
+    always @(posedge mem_clk) begin
+        if (wk_en && u_fb.rd_go) begin
+            wk_exp = (u_fb.rd_cnt << 2) + ((u_fb.rd_cnt >= rd_wipe_t) ? 21'd614400 : 21'd0);
+            if (u_fb.app_rd_addr !== wk_exp) wk_bad = wk_bad + 1;
+            wk_chk = wk_chk + 1;
+            if (u_fb.rd_cnt < rd_wipe_t) wk_lo = wk_lo + 1; else wk_hi = wk_hi + 1;
+        end
+    end
+
     // 写路径计数器：看 153600 字在哪一步丢的
     integer c_tk3 = 0, c_wd3 = 0, c_tl3 = 0, c_bs3 = 0, c_pp3 = 0;
     reg     bsd3 = 1'b0;
@@ -509,6 +527,26 @@ module tb_frame_win;
 
         // 等 6 帧让读侧稳定（FIFO 预取需要时间）
         for (k = 0; k < 6; k = k + 1) @(posedge vs);
+
+        // ---- 转场分界（整幅推入）地址检查 ----
+        //   rd_wipe_t = 76800 时：字 < 76800 读 bank0，>= 76800 读 bank1。
+        //   检查每个读拍 app_rd_addr 是否 = rd_cnt*4 + (跨过分界 ? 614400 : 0)。
+        rd_bank_t     = 1'b0;
+        rd_bank_new_t = 1'b1;
+        rd_wipe_t     = 20'd76800;
+        repeat (3) @(posedge vs);
+        wk_en = 1'b1;
+        @(posedge vs);
+        wk_en = 1'b0;
+        $display("[wipe] 检查 %0d 拍：上半 %0d 拍、下半 %0d 拍，地址错 %0d",
+                 wk_chk, wk_lo, wk_hi, wk_bad);
+        if (wk_bad == 0 && wk_lo > 1000 && wk_hi > 1000)
+            $display("[wipe] PASS：分界两侧 bank 切换正确");
+        else
+            $display("[wipe] FAIL：分界地址不对");
+        rd_bank_new_t = 1'b0;
+        rd_wipe_t     = 20'd153600;
+        repeat (3) @(posedge vs);
 
         wait ((act_x == 12'd0) && (act_y == 12'd0));
         @(posedge pix_clk);

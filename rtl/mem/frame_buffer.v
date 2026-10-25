@@ -68,6 +68,11 @@ module frame_buffer #(
     input  wire        rd_buf,
     input  wire        load_mode,      // 1=首次加载：整帧只写不读
     input  wire        rd_bank,        // 读缓冲：0=A(字 0 起) 1=B(字 153600 起)
+    // 整幅推入式转场：字索引 < rd_wipe 用 rd_bank（旧图），>= rd_wipe 用 rd_bank_new（新图）。
+    // 正常显示时 rd_wipe = 153600 且 rd_bank_new = rd_bank。
+    // 因为 153600/320 都是 4 的倍数、每步也按 4 对齐，4 字 burst 绝不会跨过分界。
+    input  wire        rd_bank_new,
+    input  wire [19:0] rd_wipe,
     input  wire        wr_bank,        // 写缓冲：另一块
     // 9 位：afifo 的 wr_used 是 [AW:0]，满的时候等于 256。
     // 曾经截成 8 位 -> 满时变 0 -> SD 读到"空"，像素全丢、整张图写不进去。
@@ -447,7 +452,9 @@ module frame_buffer #(
 
     assign app_rd_en   = rd_go;
     wire [20:0] rd_raw  = {1'b0, rd_cnt};
-    wire [20:0] rd_bank_off = rd_bank ? IT21 : 21'd0;
+    // 转场分界：前半（上方）读旧 bank，后半（下方）读新 bank
+    wire        rd_bank_eff = (rd_cnt < rd_wipe) ? rd_bank : rd_bank_new;
+    wire [20:0] rd_bank_off = rd_bank_eff ? IT21 : 21'd0;
     assign app_rd_addr = {rd_raw[18:0], 2'b00} +
                          {rd_bank_off[18:0], 2'b00};
 

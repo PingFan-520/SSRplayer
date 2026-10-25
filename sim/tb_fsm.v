@@ -36,12 +36,17 @@ module tb_fsm;
                      LD_CLEAR = 3'd1,     // 把整个图片区写黑（缩放后留边不会残留上一张）
                      LD_ARM   = 3'd2,     // 换图后先让 img_idx 稳定
                      LD_LOAD  = 3'd3,
+                     LD_WIPE  = 3'd5,     // 整幅推入转场（新图从下往上推入）
                      LD_SHOW  = 3'd4;
 
     reg        rd_en;
     reg        sc_clr;
     reg        load_mode;
     reg        rd_bank, wr_bank;
+    reg        rd_bank_new;
+    reg  [19:0] rd_wipe;
+    reg        img_changed;
+    reg  [1:0] dbg_effect;          // 0=FADE -> 走整幅推入
     reg  [7:0] img_idx;
 
     reg [2:0]  ld_st;
@@ -66,9 +71,14 @@ module tb_fsm;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
+            rd_bank_new <= 1'b0;
+            rd_wipe   <= 20'd153600;     // 153600 = 全部读旧 bank（正常显示）
+            img_changed <= 1'b0;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
+            if (ld_st != LD_LOAD) img_changed <= 1'b0;
+
             case (ld_st)
                 LD_WAIT: begin
                     if (sd_ready) begin
@@ -137,18 +147,44 @@ module tb_fsm;
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             ld_wdog   <= 28'd0;
-                            if (USE_DBL[0]) begin
-                                rd_bank <= wr_bank;   // 显示切到刚写好的那块
-                                wr_bank <= ~wr_bank;  // 下一张写另一块
-                            end else begin
-                                rd_bank <= 1'b0;      // 单缓冲：永远用 bank0
-                                wr_bank <= 1'b0;
-                            end
                             load_mode <= 1'b0;
                             hold_frm  <= 16'd0;
-                            ld_st     <= LD_SHOW;
+                            // 菜单里选 CUT(3) 就硬切；其它特效走"整幅推入"。
+                            // FADE/SLIDE 需要同时读两块相同坐标，单读口做不到，
+                            // 所以统一映射成推入（视觉上也是明确的转场）。
+                            if (USE_DBL[0] && (dbg_effect != 2'd3)) begin
+                                // 不瞬间切换：新图先待在 rd_bank_new 里，
+                                // 由 LD_WIPE 每帧把分界往下推 48 行，10 帧推完。
+                                // 两张图同屏共存，中间没有黑场。
+                                rd_bank_new <= wr_bank;
+                                rd_wipe     <= 20'd153600;
+                                ld_st       <= LD_WIPE;
+                            end else begin
+                                rd_bank     <= USE_DBL[0] ? wr_bank : 1'b0;
+                                rd_bank_new <= USE_DBL[0] ? wr_bank : 1'b0;
+                                rd_wipe     <= 20'd153600;
+                                wr_bank     <= USE_DBL[0] ? ~wr_bank : 1'b0;
+                                ld_st       <= LD_SHOW;
+                            end
                         end else begin
                             fin_dly <= fin_dly + 13'd1;
+                        end
+                    end
+                end
+
+                // 整幅推入：每帧把分界下移 15360 字（= 48 行），10 帧推完。
+                // 分界必须整 4 字对齐（15360 / 320 都是 4 的倍数），
+                // 这样 4 字 burst 绝不会跨 bank，控制器不会读到错位数据。
+                LD_WIPE: begin
+                    if (frame_top) begin
+                        if (rd_wipe <= 20'd15360) begin
+                            rd_wipe <= 20'd153600;      // 恢复常值
+                            rd_bank <= rd_bank_new;     // 显示正式切到新图
+                            wr_bank <= ~rd_bank_new;    // 下一张写另一块
+                            hold_frm <= 16'd0;
+                            ld_st    <= LD_SHOW;
+                        end else begin
+                            rd_wipe <= rd_wipe - 20'd15360;
                         end
                     end
                 end

@@ -202,8 +202,12 @@ module top_osd_demo #(
     // 亮度 / 对比度
     // ------------------------------------------------------------------
     wire [23:0] adj_rgb;
+    // USE_EXT（真实图片）：转场改由帧缓存做"整幅推入"（双 bank 分界），
+    // OSD 这一级必须直通，否则会再叠一次淡入 -> 中间出现黑场（上板踩过）。
+    wire [23:0] trans_use = USE_EXT ? base_a : trans_rgb;
+
     param_apply u_param (
-        .rgb_in(trans_rgb),
+        .rgb_in(trans_use),
         .bright(ef_bright), .contrast(ef_contrast),
         .rgb_out(adj_rgb)
     );

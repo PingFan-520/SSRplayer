@@ -139,6 +139,8 @@ module tb_frame_sdram;
         .rd_buf  (1'b0),
         .load_mode(load_mode),
         .rd_bank (1'b0),
+        .rd_bank_new(1'b0),
+        .rd_wipe (20'd153600),
         .wr_bank (1'b0),
         .wr_fifo_used(),
         .rgb_out (fb_rgb),
