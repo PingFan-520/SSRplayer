@@ -41,6 +41,10 @@ module top_board #(
     parameter integer SEC_BASE   = 2048,      // 第 0 张图起始扇区（1MB 偏移）
     parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
     parameter integer IMG_NUM    = 8,         // 循环张数
+    // 音乐区（tools/make_sd_image.py 会打印这三个数）
+    parameter integer MUS_BASE   = 45312,     // 音乐区起始扇区
+    parameter integer MUS_STRIDE = 8952,      // 每首占的扇区数
+    parameter integer MUS_NUM    = 4,         // 曲目数
     parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
     // 双缓冲开关：1 = 双缓冲（换图/淡入淡出转场必须用它）；0 = 单缓冲（换图黑一下）
     //   ★ 2026-10-25：从 0 改回 1。
@@ -207,8 +211,8 @@ module top_board #(
     reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
     wire [1:0]  dbg_effect;         // 菜单里选的转场特效（提前声明，FSM 要用）
     wire [1:0]  dbg_scale;          // 菜单里选的缩放档位（给 bmp_scale）
-    wire [3:0]  dbg_vol;            // 菜单音量 0..10（给 tone_gen）
-    wire        dbg_mus;            // 菜单"背景音乐"开关
+    wire [3:0]  dbg_vol;            // 菜单音量 0..10
+    wire [2:0]  dbg_mus;            // 菜单 MUS：0=关 1=内置音阶 2..5=SD 曲目 1..4
     wire [7:0]  aud_lvl;            // 音频包络（给电平表）
 
     // 淡入淡出转场：255=正常亮度，0=全黑。换 bank 发生在全黑那一刻，看不见。
@@ -293,6 +297,23 @@ module top_board #(
     wire [31:0] sd_rd_sec_addr;
     wire [15:0] sd_rd_val_data;
 
+    // ------------------------------------------------------------------
+    // SD 总线仲裁：音频优先（连续播放），图片等待（按扇区让路）
+    //   sd_ctrl_top 只有一个读口，两个人必须分时；
+    //   各自看到"被门控过"的 busy/val/data，否则会误收别人的数据。
+    // ------------------------------------------------------------------
+    wire        arb_start, arb_busy, arb_val;
+    wire [31:0] arb_sec;
+    wire [15:0] arb_data;
+
+    wire        wav_req;
+    wire [31:0] wav_sec;
+    wire        wav_busy, wav_val, wav_gnt;
+    wire [15:0] wav_data;
+
+    wire        img_busy, img_val, img_gnt;
+    wire [15:0] img_data;
+
     sd_ctrl_top u_sd (
         .clk_ref      (clk_sd),
         .rst_n        (rst_n),
@@ -302,13 +323,24 @@ module top_board #(
         .sd_cs        (sd_cs),
         .sd_mosi      (sd_mosi),
 
-        .rd_start_en  (sd_rd_start_en),
-        .rd_sec_addr  (sd_rd_sec_addr),
-        .rd_busy      (sd_rd_busy),
-        .rd_val_en    (sd_rd_val_en),
-        .rd_val_data  (sd_rd_val_data),
+        .rd_start_en  (arb_start),
+        .rd_sec_addr  (arb_sec),
+        .rd_busy      (arb_busy),
+        .rd_val_en    (arb_val),
+        .rd_val_data  (arb_data),
 
         .sd_init_done (sd_init_done)
+    );
+
+    sd_arb u_arb (
+        .clk(clk_sd), .rst_n(rst_n),
+        .a_req(wav_req), .a_sec(wav_sec),
+        .a_busy(wav_busy), .a_val(wav_val), .a_data(wav_data), .a_gnt(wav_gnt),
+        .b_req(sd_rd_start_en), .b_sec(sd_rd_sec_addr),
+        .b_busy(img_busy), .b_val(img_val), .b_data(img_data), .b_gnt(img_gnt),
+        .s_start(arb_start), .s_sec(arb_sec),
+        .s_busy(arb_busy), .s_val(arb_val), .s_data(arb_data),
+        .sd_init_done(sd_init_done)
     );
 
     // ------------------------------------------------------------------
@@ -331,9 +363,9 @@ module top_board #(
 
         .rd_start_en  (sd_rd_start_en),
         .rd_sec_addr  (sd_rd_sec_addr),
-        .rd_busy      (sd_rd_busy),
-        .rd_val_en    (sd_rd_val_en),
-        .rd_val_data  (sd_rd_val_data),
+        .rd_busy      (img_busy),
+        .rd_val_en    (img_val),
+        .rd_val_data  (img_data),
         .sd_init_done (sd_init_done),
 
         .enable       (rd_en),
@@ -791,7 +823,8 @@ module top_board #(
         .PX0(360), .PY0(80), .PW(560), .PH(560),
         .HOLD_FRAMES(75),
         .KEY_CLK_HZ(37_500_000),
-        .USE_EXT(1)
+        .USE_EXT(1),
+        .MUS_NUM(MUS_NUM)
     ) u_core (
         .clk(clk_pix), .rst_n(rst_n),
         .key({key2, key4, key3, key1}),      // {OK, DOWN, UP, MENU}
@@ -846,17 +879,54 @@ module top_board #(
     wire        aud_valid;
     wire [23:0] aud_left, aud_right;
 
+    wire        tone_valid;
+    wire [23:0] tone_l, tone_r;
+    wire [7:0]  tone_lvl;
+
+    wire        wav_valid;
+    wire [23:0] wav_l, wav_r;
+    wire [7:0]  wav_lvl;
+
     tone_gen #(.CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)) u_tone (
         .clk       (clk_pix),
         .rst       (~rst_n),
         .note_idx  (img_idx),
-        .vol       (dbg_vol),        // 菜单第 6 项：音量 0..10
-        .mute      (~dbg_mus),       // 菜单第 5 项：MUS ON/OFF（原来是没实现的"字幕"）
-        .aud_valid (aud_valid),
-        .aud_left  (aud_left),
-        .aud_right (aud_right),
-        .env_out   (aud_lvl)
+        .vol       (dbg_vol),
+        .mute      (dbg_mus != 3'd1),        // 只有"内置音阶"档才响
+        .aud_valid (tone_valid),
+        .aud_left  (tone_l),
+        .aud_right (tone_r),
+        .env_out   (tone_lvl)
     );
+
+    // 菜单 MUS：2..5 -> SD 曲目 1..4
+    wire [2:0] wav_trk = (dbg_mus >= 3'd2) ? (dbg_mus - 3'd1) : 3'd0;
+
+    wav_player #(
+        .SEC_BASE(MUS_BASE), .SEC_STRIDE(MUS_STRIDE), .TRK_NUM(MUS_NUM),
+        .CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)
+    ) u_wav (
+        .clk     (clk_pix),
+        .clk_sd  (clk_sd),
+        .rst     (~rst_n),
+        .track   (wav_trk),
+        .vol     (dbg_vol),
+        .s_req   (wav_req),
+        .s_sec   (wav_sec),
+        .s_busy  (wav_busy),
+        .s_val   (wav_val),
+        .s_data  (wav_data),
+        .aud_valid(wav_valid),
+        .aud_left (wav_l),
+        .aud_right(wav_r),
+        .level    (wav_lvl)
+    );
+
+    // 音源选择：有 WAV 曲目就放 WAV，否则放内置音阶
+    assign aud_valid = (wav_trk != 3'd0) ? wav_valid : tone_valid;
+    assign aud_left  = (wav_trk != 3'd0) ? wav_l     : tone_l;
+    assign aud_right = (wav_trk != 3'd0) ? wav_r     : tone_r;
+    assign aud_lvl   = (wav_trk != 3'd0) ? wav_lvl   : tone_lvl;
 
     wire [9:0] tmds_ch0, tmds_ch1, tmds_ch2, tmds_clk;
 

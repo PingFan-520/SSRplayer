@@ -169,8 +169,13 @@ module sd_bmp_reader #(
                 end
 
                 S_WT: begin
-                    rd_start_en <= 1'b0;
-                    if (rd_busy) st <= S_RCV;      // sd_read 已开始发命令
+                    // 加了 sd_arb 之后，本模块的请求可能要和音频抢总线：
+                    // 这里必须**保持 rd_start_en 为高**直到 busy 起来，
+                    // 否则那一拍被音频抢走，请求就丢了 -> 永远等不到 busy（卡死）。
+                    if (rd_busy) begin
+                        rd_start_en <= 1'b0;
+                        st          <= S_RCV;      // sd_read 已开始发命令
+                    end
                 end
 
                 S_RCV: begin

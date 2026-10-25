@@ -35,6 +35,7 @@ SEC_BASE   = 2048
 SEC_SIZE   = 512
 BMP_MAX_W  = 4096      # bmp_decode 的 o_sx 是 12 位
 BMP_MAX_H  = 4096
+WAV_SR     = 48000     # 必须与 HDMI 的 ACR 一致（N=6144/CTS=37500 @37.5MHz）
 
 
 def probe_bmp(path):
@@ -62,6 +63,33 @@ def probe_bmp(path):
     return True, "%dx%d size=%d off=%d" % (w, abs(hh), bf, off)
 
 
+def probe_wav(path):
+    """检查 WAV 是否为"单声道 / 16bit / 48kHz / 头正好 44 字节"
+
+    为什么要求这么死：
+      RTL 侧的 wav_player 每收一个 16bit SD 字就当**一个采样**用（单声道），
+      并且固定跳过前 22 个字（44 字节头）；不满足这个规格就得在 FPGA 里重采样/拆包，
+      性价比极低。PC 端 ffmpeg 转一下就好：
+          ffmpeg -i in.mp3 -ar 48000 -ac 1 -sample_fmt s16 out.wav
+    """
+    import wave as wavelib
+    try:
+        w = wavelib.open(path, "rb")
+    except Exception as e:
+        return False, "打不开: %s" % e
+    ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+    w.close()
+    if ch != 1:
+        return False, "%d 声道（需要单声道，用 -ac 1 转）" % ch
+    if sw != 2:
+        return False, "%d bit（需要 16bit，用 -sample_fmt s16）" % (sw * 8)
+    if sr != WAV_SR:
+        return False, "%d Hz（需要 48000，用 -ar 48000）" % sr
+    if n <= 0:
+        return False, "没有采样"
+    return True, "%d 采样 (%.1f 秒)" % (n, n / float(WAV_SR))
+
+
 def sectors(n):
     """字节数 -> 扇区数，向上取整并对齐到 8（读取器按 512B 扇区走，对齐好看）"""
     s = (n + SEC_SIZE - 1) // SEC_SIZE
@@ -79,6 +107,11 @@ def main():
         files = args
     else:
         files = sorted(glob.glob(os.path.join(ROOT, "图片资源", "*.bmp")))
+
+    if args:
+        wavs = []
+    else:
+        wavs = sorted(glob.glob(os.path.join(ROOT, "音乐资源", "*.wav")))
 
     if not files:
         raise SystemExit("没找到 BMP")
@@ -103,7 +136,21 @@ def main():
           % (stride, len(files)))
     print("-" * 74)
 
-    total = SEC_BASE * SEC_SIZE + len(files) * img_max
+    # ---- 音乐区：紧接图片区，每首占固定扇区数 ----
+    wav_info = []
+    for p in wavs:
+        ok, msg = probe_wav(p)
+        if not ok:
+            raise SystemExit("%s : %s" % (os.path.basename(p), msg))
+        wav_info.append((p, os.path.getsize(p), msg))
+
+    mus_base   = SEC_BASE + len(files) * stride
+    mus_stride = max([sectors(sz) for _, sz, _ in wav_info]) if wav_info else 0
+    mus_bytes  = mus_stride * SEC_SIZE
+
+    total = (mus_base + len(wav_info) * mus_stride) * SEC_SIZE
+    if total < SEC_BASE * SEC_SIZE + len(files) * img_max:
+        total = SEC_BASE * SEC_SIZE + len(files) * img_max
     buf = bytearray(total)
 
     for i, (p, sz, msg) in enumerate(info):
@@ -116,8 +163,20 @@ def main():
     with open(out, "wb") as f:
         f.write(buf)
 
+    # ---- 写音乐区 ----
+    for i, (p, sz, msg) in enumerate(wav_info):
+        data = open(p, "rb").read()
+        base = (mus_base + i * mus_stride) * SEC_SIZE
+        buf[base:base + len(data)] = data
+        print("[M%d] %-39s %7d 字节 @扇区 %-6d %s"
+              % (i + 1, os.path.basename(p), len(data), mus_base + i * mus_stride, msg))
+
     print("-" * 74)
-    print("共 %d 张，镜像 %d 字节 (%.2f MB)" % (len(files), total, total / 1048576.0))
+    print("共 %d 张图、%d 首音乐，镜像 %d 字节 (%.2f MB)"
+          % (len(files), len(wav_info), total, total / 1048576.0))
+    if wav_info:
+        print("       ↑ 音乐区：把 MUS_BASE=%d、MUS_STRIDE=%d、MUS_NUM=%d 抄进 rtl/top_board.v"
+              % (mus_base, mus_stride, len(wav_info)))
     print()
     print("下一步：tools\\write_sd.bat 右键以管理员身份运行，把镜像写进 SD 卡。")
     print("注意：写入会覆盖卡的分区表，写完后卡在 Windows 里不可读，属正常。")

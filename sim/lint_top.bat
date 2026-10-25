@@ -30,6 +30,7 @@ if exist lint_work rmdir /s /q lint_work
   "%PRJ%\rtl\sd\sd_read.v" ^
   "%PRJ%\rtl\sd\sd_ctrl_top.v" ^
   "%PRJ%\rtl\sd\sd_bmp_reader.v" ^
+  "%PRJ%\rtl\sd\sd_arb.v" ^
   "%PRJ%\rtl\ui\font_rom.v" ^
   "%PRJ%\rtl\ui\key_ctrl.v" ^
   "%PRJ%\rtl\ui\osd_menu.v" ^

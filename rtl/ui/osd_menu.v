@@ -14,7 +14,8 @@ module osd_menu #(
     parameter integer PX0 = 360,      // 面板左上角
     parameter integer PY0 = 110,
     parameter integer PW  = 560,
-    parameter integer PH  = 500
+    parameter integer PH  = 500,
+    parameter integer MUS_NUM = 4     // SD 曲目数（菜单 MUS 项：0=关 1=内置 2..1+N=曲目）
 )(
     input  wire        clk,
     input  wire        rst,
@@ -40,7 +41,7 @@ module osd_menu #(
     output reg  [3:0]  cfg_bright,
     output reg  [3:0]  cfg_contrast,
     output reg  [1:0]  cfg_scale,
-    output reg         cfg_sub,
+    output reg  [2:0]  cfg_mus,     // 0=关 1=内置音阶 2..=SD 曲目
     output reg  [3:0]  cfg_vol,
     output reg         cfg_meter     // 1 = 显示音频电平表
 );
@@ -66,7 +67,7 @@ module osd_menu #(
     reg [3:0]  v_bright;
     reg [3:0]  v_contrast;
     reg [1:0]  v_scale;
-    reg        v_sub;
+    reg [2:0]  v_mus;
     reg [3:0]  v_vol;
     reg        v_meter;
 
@@ -75,7 +76,7 @@ module osd_menu #(
                          (item == 3'd1) ? v_bright            :
                          (item == 3'd2) ? v_contrast          :
                          (item == 3'd3) ? {2'b00, v_scale}    :
-                         (item == 3'd4) ? {3'b000, v_sub}     :
+                         (item == 3'd4) ? v_mus               :
                          (item == 3'd5) ? v_vol               :
                                           {3'b000, v_meter};
 
@@ -91,7 +92,7 @@ module osd_menu #(
             v_bright   <= 4'd10;
             v_contrast <= 4'd10;
             v_scale    <= 2'd0;
-            v_sub      <= 1'b1;
+            v_mus      <= 3'd1;      // 默认：内置音阶
             v_vol      <= 4'd6;
             v_meter    <= 1'b1;
         end else begin
@@ -110,7 +111,8 @@ module osd_menu #(
                         3'd1: v_bright   <= (v_bright >= 4'd10) ? 4'd0 : v_bright + 4'd1;
                         3'd2: v_contrast <= (v_contrast >= 4'd10) ? 4'd0 : v_contrast + 4'd1;
                         3'd3: v_scale    <= (v_scale == 2'd2) ? 2'd0 : v_scale + 2'd1;
-                        3'd4: v_sub      <= ~v_sub;
+                        3'd4: v_mus      <= (v_mus >= MUS_NUM[2:0] + 3'd1) ? 3'd0
+                                                               : v_mus + 3'd1;
                         3'd5: v_vol      <= (v_vol >= 4'd10) ? 4'd0 : v_vol + 4'd1;
                         default: v_meter <= ~v_meter;
                     endcase
@@ -125,7 +127,7 @@ module osd_menu #(
         cfg_bright   <= v_bright;
         cfg_contrast <= v_contrast;
         cfg_scale    <= v_scale;
-        cfg_sub      <= v_sub;
+        cfg_mus      <= v_mus;
         cfg_vol      <= v_vol;
         cfg_meter    <= v_meter;
     end
@@ -133,13 +135,6 @@ module osd_menu #(
     reg [11:0] y_d;
     always @(posedge clk) y_d <= y;
     always @(posedge clk) cfg_commit <= (y == 12'd0) && (y_d != 12'd0);
-
-    // 字幕开关也在帧首提交，避免一行字被切成两半
-    reg sub_on;
-    always @(posedge clk or posedge rst) begin
-        if (rst)            sub_on <= 1'b1;
-        else if (cfg_commit) sub_on <= v_sub;
-    end
 
     // ------------------------------------------------------------------
     // 几何区域
@@ -162,7 +157,7 @@ module osd_menu #(
                          (ridx == 3'd1) ? v_bright            :
                          (ridx == 3'd2) ? v_contrast          :
                          (ridx == 3'd3) ? {2'b00, v_scale}    :
-                         (ridx == 3'd4) ? {3'b000, v_sub}     :
+                         (ridx == 3'd4) ? v_mus               :
                          (ridx == 3'd5) ? v_vol               :
                                           {3'b000, v_meter};
 
@@ -361,7 +356,22 @@ module osd_menu #(
                         default: g_val = (v == 4'd2) ? 6'd7 : 6'd37;
                     endcase
                 end
-                3'd4, 3'd6: begin                 // ON / OFF（字幕 / VU）
+                3'd4: begin                       // MUS：OFF / GEN / T1..T4
+                    case (i)
+                        3'd0: g_val = (v == 4'd0) ? 6'd14 :                 // O
+                                      (v == 4'd1) ? 6'd6  :                 // G
+                                      (v <= 4'd9) ? 6'd19 : 6'd37;          // T
+                        3'd1: g_val = (v == 4'd0) ? 6'd5  :                 // F
+                                      (v == 4'd1) ? 6'd4  :                 // E
+                                      (v == 4'd2) ? 6'd27 :                 // 1
+                                      (v == 4'd3) ? 6'd28 :                 // 2
+                                      (v == 4'd4) ? 6'd29 : 6'd30;          // 3 / 4
+                        3'd2: g_val = (v == 4'd0) ? 6'd5  :                 // F
+                                      (v == 4'd1) ? 6'd13 : 6'd37;          // N
+                        default: g_val = 6'd37;
+                    endcase
+                end
+                3'd6: begin                       // VU：ON / OFF
                     case (i)
                         3'd0: g_val = 6'd14;                       // O
                         3'd1: g_val = v[0] ? 6'd13 : 6'd5;         // N / F
@@ -435,12 +445,6 @@ module osd_menu #(
             end
         end
 
-        // ---- 字幕条底（半透明黑） ----
-        if (sub_on && sub_bar) begin
-            s0_base_rgb   = 24'h00_00_00;
-            s0_base_alpha = 4'd5;
-        end
-
         // ---- 文本：菜单优先，其次字幕 ----
         if (open && title_hv) begin
             s0_text   = 1'b1;
@@ -466,12 +470,6 @@ module osd_menu #(
             s0_fcol   = hcx[3:0];
             s0_frow   = y - (PY0 + PH - 28);
             s0_tcolor = C_HINT;
-        end else if (sub_on && sub_hv) begin
-            s0_text   = 1'b1;
-            s0_glyph  = g_sub(sub_tx[9:5]);
-            s0_fcol   = sub_tx[4:1];
-            s0_frow   = (y - (VACTIVE - 96)) >> 1;
-            s0_tcolor = 24'hFF_FF_FF;
         end
     end
 
