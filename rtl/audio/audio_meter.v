@@ -21,11 +21,11 @@
 `timescale 1ns / 1ps
 
 module audio_meter #(
-    parameter integer X0   = 384,     // 面板左上角（屏幕坐标）
-    parameter integer Y0   = 610,
-    parameter integer BARW = 16,      // 每根柱子占 16 像素（14 实 + 2 空）
-    parameter integer NBAR = 32,      // 柱子数（32 x 16 = 512 像素宽）
-    parameter integer MAXH = 104      // 柱区高度（像素）
+    parameter integer X0   = 320,     // 面板左上角 = 图片框左边界
+    parameter integer Y0   = 468,     // 叠在图片下部
+    parameter integer BARW = 8,       // 每根柱子 8 像素（7 实 + 1 空）-> 更窄
+    parameter integer NBAR = 80,      // 80 列 x 8 = 640，正好与图片同宽
+    parameter integer MAXH = 112      // 柱区高度（像素）
 )(
     input  wire        clk,
     input  wire        rst,
@@ -80,9 +80,9 @@ module audio_meter #(
     wire [11:0] dy = y - Y0[11:0];
 
     // bars[0] 是最新的一列，画在最右边（示波器/瀑布图习惯）
-    // BARW=16 -> 柱索引取 dx[8:4]，柱内 2 像素间隙（dx[3:0] >= 14）
-    wire [4:0]  bi    = 5'd31 - dx[8:4];
-    wire        ingap = (dx[3:0] >= 4'd14);
+    // BARW=8 -> 柱索引 = dx/8（移位，无除法器），柱内 1 像素间隙（dx[2:0]==7）
+    wire [6:0]  bi    = 7'd79 - dx[9:3];
+    wire        ingap = (dx[2:0] == 3'd7);
 
     wire [7:0]  lv = bars[bi];
     // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）

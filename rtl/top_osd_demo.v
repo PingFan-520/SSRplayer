@@ -298,7 +298,7 @@ module top_osd_demo #(
     wire [3:0]  m_alpha;
 
     audio_meter #(
-        .X0(384), .Y0(610), .BARW(16), .NBAR(32), .MAXH(104)
+        .X0(320), .Y0(468), .BARW(8), .NBAR(80), .MAXH(112)
     ) u_meter (
         .clk(clk), .rst(rst),
         .x(xd3), .y(yd3),              // 早一拍，模块内部寄存后与视频对齐
@@ -308,7 +308,23 @@ module top_osd_demo #(
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );
 
-    assign rgb_out = m_on ? m_rgb : blend_menu;
+    // ------------------------------------------------------------------
+    // 叠加：电平表画在**图片上**，半透明（75% 电平表 + 25% 画面）。
+    //   固定 3:1 混合可以只用移位+加法：out = v/4 + m/2 + m/4，零乘法器。
+    // ------------------------------------------------------------------
+    function [7:0] mix_meter;
+        input [7:0] v;
+        input [7:0] m;
+        begin
+            mix_meter = {2'b00, v[7:2]} + {1'b0, m[7:1]} + {2'b00, m[7:2]};
+        end
+    endfunction
+
+    assign rgb_out = m_on
+                   ? { mix_meter(blend_menu[23:16], m_rgb[23:16]),
+                       mix_meter(blend_menu[15:8],  m_rgb[15:8]),
+                       mix_meter(blend_menu[7:0],   m_rgb[7:0])  }
+                   : blend_menu;
 
     assign hs_out = hsd4;
     assign vs_out = vsd4;

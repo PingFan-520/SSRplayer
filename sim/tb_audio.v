@@ -53,7 +53,7 @@ module tb_audio;
     reg  [11:0] mx = 12'd0, my = 12'd0;
     reg         mfs = 1'b0;            // 帧首（推一列）
 
-    audio_meter #(.X0(384), .Y0(610), .BARW(16), .NBAR(32), .MAXH(104)) u_m (
+    audio_meter #(.X0(320), .Y0(468), .BARW(8), .NBAR(80), .MAXH(112)) u_m (
         .clk(clk), .rst(rst),
         .x(mx), .y(my),
         .frame_start(mfs),
@@ -199,33 +199,33 @@ module tb_audio;
         // ---- 4) 电平表 ----
         // level=255 -> 高度 0.625*255=159 被夹到 MAXH=96 -> 整列填满
         level = 8'd255;
-        for (i = 0; i < 40; i = i + 1) push_col;      // 32 列全部填满
-        mx = 12'd387; my = 12'd610;      // 柱顶（dy=0）
+        for (i = 0; i < 100; i = i + 1) push_col;      // 32 列全部填满
+        mx = 12'd323; my = 12'd468;      // 柱顶（dy=0）
         @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱顶未点亮"); errs = errs + 1; end
-        mx = 12'd387; my = 12'd713;      // 柱底（dy=103）
+        mx = 12'd323; my = 12'd579;      // 柱底（dy=103）
         @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱底未点亮"); errs = errs + 1; end
-        mx = 12'd398; my = 12'd680;      // dx=14 -> 柱子间隙
+        mx = 12'd327; my = 12'd520;      // dx=14 -> 柱子间隙
         @(posedge clk); #1; if (m_on) begin $display("[FAIL] 柱子间隙不该点亮"); errs = errs + 1; end
-        mx = 12'd387; my = 12'd600;      // 面板上方（图片区下缘）
+        mx = 12'd323; my = 12'd460;      // 面板上方（图片区下缘）
         @(posedge clk); #1; if (m_on) begin $display("[FAIL] 面板外不该点亮"); errs = errs + 1; end
-        mx = 12'd898; my = 12'd680;      // 面板右侧（x 边界外，384+512=896）
+        mx = 12'd962; my = 12'd520;      // 面板右侧（x 边界外，384+512=896）
         @(posedge clk); #1; if (m_on) begin $display("[FAIL] 面板外(右)不该点亮"); errs = errs + 1; end
 
         // level=64 -> 高度 0.625*64=40 -> thr=56；dy=95 亮、dy=40 灭
         level = 8'd64;
-        for (i = 0; i < 40; i = i + 1) push_col;
-        mx = 12'd387; my = 12'd713;
+        for (i = 0; i < 100; i = i + 1) push_col;
+        mx = 12'd323; my = 12'd579;
         @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 低电平：柱底应点亮"); errs = errs + 1; end
-        mx = 12'd387; my = 12'd650;      // dy=40 < 64
+        mx = 12'd323; my = 12'd520;      // dy=40 < 64
         @(posedge clk); #1; if (m_on) begin $display("[FAIL] 低电平：柱高应较低（dy=40 不该亮）"); errs = errs + 1; end
 
         // 颜色分段：顶部红、底部蓝
         level = 8'd255;
-        for (i = 0; i < 40; i = i + 1) push_col;
-        mx = 12'd387; my = 12'd615;      // dy=5 -> 红
+        for (i = 0; i < 100; i = i + 1) push_col;
+        mx = 12'd323; my = 12'd473;      // dy=5 -> 红
         @(posedge clk); #1; if (m_rgb !== 24'hFF2A18) begin
             $display("[FAIL] 顶部颜色 %06h，应为红 FF2A18", m_rgb); errs = errs + 1; end
-        mx = 12'd387; my = 12'd706;      // dy=96 -> 蓝
+        mx = 12'd323; my = 12'd568;      // dy=96 -> 蓝
         @(posedge clk); #1; if (m_rgb !== 24'h3355FF) begin
             $display("[FAIL] 底部颜色 %06h，应为蓝 3355FF", m_rgb); errs = errs + 1; end
         $display("[ok] 电平表几何/间隙/颜色分段正确");
@@ -240,11 +240,11 @@ module tb_audio;
             end
             level = 8'd0;
             fd = $fopen("meter_out.ppm", "wb");
-            $fwrite(fd, "P6\n512 104\n255\n");
-            for (by = 0; by < 104; by = by + 1) begin
-                for (bx = 0; bx < 512; bx = bx + 1) begin
-                    mx = 384 + bx;
-                    my = 610 + by;
+            $fwrite(fd, "P6\n640 112\n255\n");
+            for (by = 0; by < 112; by = by + 1) begin
+                for (bx = 0; bx < 640; bx = bx + 1) begin
+                    mx = 320 + bx;
+                    my = 468 + by;
                     @(posedge clk); #1;
                     cc = m_on ? m_rgb : 24'h000000;
                     $fwrite(fd, "%c%c%c", cc[23:16], cc[15:8], cc[7:0]);
