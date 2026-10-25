@@ -42,6 +42,10 @@ module osd_menu #(
     output reg  [3:0]  cfg_contrast,
     output reg  [1:0]  cfg_scale,
     output reg  [2:0]  cfg_mus,     // 0=关 1=内置音阶 2..=SD 曲目
+    output reg         cfg_auto,    // 1=图片自动轮播
+    output wire        nav_next,    // 非菜单态下 KEY1：下一张
+    output wire        nav_prev,    // 非菜单态下 KEY2：上一张
+    output wire        page_mus,    // 当前是否停在音乐列表页（调试用）
     output reg  [3:0]  cfg_vol,
     output reg         cfg_meter     // 1 = 显示音频电平表
 );
@@ -62,6 +66,7 @@ module osd_menu #(
     // 菜单状态
     // ------------------------------------------------------------------
     reg        open;
+    reg        page;               // 0=设置菜单 1=音乐列表
     reg [2:0]  item;
     reg [1:0]  v_trans;
     reg [3:0]  v_bright;
@@ -70,13 +75,14 @@ module osd_menu #(
     reg [2:0]  v_mus;
     reg [3:0]  v_vol;
     reg        v_meter;
+    reg        v_auto;             // 轮播开关（默认开）
 
     // 当前光标项的取值
     wire [3:0] cur_val = (item == 3'd0) ? {2'b00, v_trans}   :
                          (item == 3'd1) ? v_bright            :
                          (item == 3'd2) ? v_contrast          :
                          (item == 3'd3) ? {2'b00, v_scale}    :
-                         (item == 3'd4) ? v_mus               :
+                         (item == 3'd4) ? {3'b000, v_auto}    :
                          (item == 3'd5) ? v_vol               :
                                           {3'b000, v_meter};
 
@@ -84,9 +90,18 @@ module osd_menu #(
     assign dbg_item  = item;
     assign dbg_val   = cur_val;
 
+    // 面板当前页的最大行号
+    wire [2:0] row_max = page ? (MUS_NUM[2:0] + 3'd1) : 3'd6;
+
+    // 非菜单态下，KEY1/KEY2 直接切图（给上层用）
+    assign nav_next = ~open & key_down;
+    assign nav_prev = ~open & key_up;
+    assign page_mus = open & page;
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             open       <= 1'b0;
+            page       <= 1'b0;
             item       <= 3'd0;
             v_trans    <= 2'd0;
             v_bright   <= 4'd10;
@@ -95,28 +110,47 @@ module osd_menu #(
             v_mus      <= 3'd1;      // 默认：内置音阶
             v_vol      <= 4'd6;
             v_meter    <= 1'b1;
+            v_auto     <= 1'b1;      // 默认：自动轮播
         end else begin
-            if (key_menu)
-                open <= ~open;
+            // ---- KEY4(MENU)：开/关"设置"页 ----
+            if (key_menu) begin
+                if (open && !page) begin
+                    open <= 1'b0;                 // 再按一次关掉
+                end else begin
+                    open <= 1'b1;
+                    page <= 1'b0;
+                    item <= 3'd0;                 // 从音乐页也能一键切到设置
+                end
+            end
 
-            if (open) begin
-                if (key_up)
-                    item <= (item == 3'd0) ? 3'd6 : item - 3'd1;
-                if (key_down)
-                    item <= (item == 3'd6) ? 3'd0 : item + 3'd1;
-
-                if (key_ok) begin
+            // ---- KEY3(OK)：非菜单态打开音乐列表；音乐页里确认；设置页里改值 ----
+            if (key_ok) begin
+                if (!open) begin
+                    open <= 1'b1;
+                    page <= 1'b1;
+                    item <= 3'd0;
+                end else if (page) begin
+                    v_mus <= item;                // 0=OFF 1=GEN 2..=T1..
+                    open  <= 1'b0;                // 选完自动关闭
+                end else begin
                     case (item)
                         3'd0: v_trans    <= (v_trans == 2'd3) ? 2'd0 : v_trans + 2'd1;
                         3'd1: v_bright   <= (v_bright >= 4'd10) ? 4'd0 : v_bright + 4'd1;
                         3'd2: v_contrast <= (v_contrast >= 4'd10) ? 4'd0 : v_contrast + 4'd1;
                         3'd3: v_scale    <= (v_scale == 2'd2) ? 2'd0 : v_scale + 2'd1;
-                        3'd4: v_mus      <= (v_mus >= MUS_NUM[2:0] + 3'd1) ? 3'd0
-                                                               : v_mus + 3'd1;
+                        3'd4: v_auto     <= ~v_auto;              // 轮播开关
                         3'd5: v_vol      <= (v_vol >= 4'd10) ? 4'd0 : v_vol + 4'd1;
                         default: v_meter <= ~v_meter;
                     endcase
                 end
+            end
+
+            // ---- KEY1/KEY2：菜单里移动光标 ----
+            if (open) begin
+                if (key_up)
+                    item <= (item == 3'd0) ? row_max : item - 3'd1;
+                if (key_down)
+                    item <= (item == row_max) ? 3'd0 : item + 3'd1;
             end
         end
     end
@@ -128,6 +162,7 @@ module osd_menu #(
         cfg_contrast <= v_contrast;
         cfg_scale    <= v_scale;
         cfg_mus      <= v_mus;
+        cfg_auto     <= v_auto;
         cfg_vol      <= v_vol;
         cfg_meter    <= v_meter;
     end
@@ -157,7 +192,7 @@ module osd_menu #(
                          (ridx == 3'd1) ? v_bright            :
                          (ridx == 3'd2) ? v_contrast          :
                          (ridx == 3'd3) ? {2'b00, v_scale}    :
-                         (ridx == 3'd4) ? v_mus               :
+                         (ridx == 3'd4) ? {3'b000, v_auto}    :
                          (ridx == 3'd5) ? v_vol               :
                                           {3'b000, v_meter};
 
@@ -199,22 +234,47 @@ module osd_menu #(
     // 字模索引
     // ------------------------------------------------------------------
     function [5:0] g_title;
+        input       pg;
         input [1:0] i;
         begin
             case (i)
-                2'd0: g_title = 6'd42;   // 调
-                2'd1: g_title = 6'd43;   // 试
-                2'd2: g_title = 6'd44;   // 菜
-                default: g_title = 6'd45; // 单
+                2'd0: g_title = pg ? 6'd12 : 6'd42;   // 音乐页: M；设置页: 调
+                2'd1: g_title = pg ? 6'd20 : 6'd43;   // U / 试
+                2'd2: g_title = pg ? 6'd18 : 6'd44;   // S / 菜
+                default: g_title = pg ? 6'd37 : 6'd45; // 空 / 单
             endcase
         end
     endfunction
 
     function [5:0] g_label;
+        input       pg;                  // 0=设置页 1=音乐列表
         input [2:0] it;
         input [1:0] i;
         begin
             g_label = 6'd37;             // 空格
+            if (pg) begin
+                // ---- 音乐列表：OFF / GEN / T1..TN ----
+                case (it)
+                    3'd0: case (i)
+                        2'd0: g_label = 6'd14;   // O
+                        2'd1: g_label = 6'd5;    // F
+                        2'd2: g_label = 6'd5;    // F
+                        default: g_label = 6'd37;
+                    endcase
+                    3'd1: case (i)
+                        2'd0: g_label = 6'd6;    // G
+                        2'd1: g_label = 6'd4;    // E
+                        2'd2: g_label = 6'd13;   // N
+                        default: g_label = 6'd37;
+                    endcase
+                    default: case (i)
+                        2'd0: g_label = 6'd19;   // T
+                        2'd1: g_label = (it >= 3'd2 && it < (MUS_NUM[2:0] + 3'd2))
+                                       ? (6'd26 + it) : 6'd37;
+                        default: g_label = 6'd37;
+                    endcase
+                endcase
+            end else
             case (it)
                 3'd0: case (i)
                     2'd0: g_label = 6'd46;   // 切
@@ -329,11 +389,19 @@ module osd_menu #(
     endfunction
 
     function [5:0] g_val;
+        input       pg;
         input [2:0] it;
         input [2:0] i;
         input [3:0] v;
         begin
             g_val = 6'd37;
+            if (pg) begin
+                // 音乐列表：当前播放的那一行标一个 '>'
+                case (i)
+                    3'd0: g_val = (it == v[2:0]) ? 6'd40 : 6'd37;
+                    default: g_val = 6'd37;
+                endcase
+            end else
             case (it)
                 3'd0: begin                       // FADE / SLIDE / WIPE / CUT
                     case (i)
@@ -448,19 +516,19 @@ module osd_menu #(
         // ---- 文本：菜单优先，其次字幕 ----
         if (open && title_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_title(tcx[6:5]);
+            s0_glyph  = g_title(page, tcx[6:5]);
             s0_fcol   = tcx[4:1];
             s0_frow   = (y - (PY0 + 24)) >> 1;
             s0_tcolor = C_TITLE;
         end else if (open && label_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_label(ridx, lcx[6:5]);
+            s0_glyph  = g_label(page, ridx, lcx[6:5]);
             s0_fcol   = lcx[4:1];
             s0_frow   = row_fr;
             s0_tcolor = C_LABEL;
         end else if (open && value_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_val(ridx, vcx[7:5], row_val);
+            s0_glyph  = g_val(page, ridx, vcx[7:5], row_val);
             s0_fcol   = vcx[4:1];
             s0_frow   = row_fr;
             s0_tcolor = C_VALUE;

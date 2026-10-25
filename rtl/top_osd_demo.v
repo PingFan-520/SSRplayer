@@ -50,6 +50,9 @@ module top_osd_demo #(
     output wire [1:0]  dbg_scale,
     output wire [3:0]  dbg_vol,      // 菜单音量 0..10（给 tone_gen）
     output wire [2:0]  dbg_mus,      // 菜单 MUS：0=关 1=内置 2..=SD 曲目
+    output wire        dbg_auto,     // 1=自动轮播
+    output wire        nav_next,     // KEY1（非菜单态）：下一张
+    output wire        nav_prev,     // KEY2（非菜单态）：上一张
 
     output wire [5:0]  seg_sel,
     output wire [7:0]  seg_data,
@@ -122,7 +125,7 @@ module top_osd_demo #(
     wire [1:0]  cfg_trans;
     wire [3:0]  cfg_bright, cfg_contrast, cfg_vol;
     wire [1:0]  cfg_scale;
-    wire [2:0]  cfg_mus; wire cfg_meter, cfg_commit;
+    wire [2:0]  cfg_mus; wire cfg_meter, cfg_auto, cfg_commit;
 
     osd_menu #(
         .HACTIVE(HACTIVE), .VACTIVE(VACTIVE),
@@ -140,6 +143,8 @@ module top_osd_demo #(
         .cfg_commit(cfg_commit),
         .cfg_trans(cfg_trans), .cfg_bright(cfg_bright), .cfg_contrast(cfg_contrast),
         .cfg_scale(cfg_scale), .cfg_mus(cfg_mus), .cfg_vol(cfg_vol),
+        .cfg_auto(cfg_auto),
+        .nav_next(nav_next), .nav_prev(nav_prev),
         .cfg_meter(cfg_meter)
     );
 
@@ -150,6 +155,7 @@ module top_osd_demo #(
     wire [3:0] ef_bright, ef_contrast, ef_vol;
     wire [1:0] ef_scale;
     wire [2:0] ef_mus;
+    wire       ef_auto;
     wire       ef_meter;
     wire [3:0] cfg_ver;
 
@@ -157,9 +163,11 @@ module top_osd_demo #(
         .clk(clk), .rst(rst), .commit(cfg_commit),
         .in_trans(cfg_trans), .in_bright(cfg_bright), .in_contrast(cfg_contrast),
         .in_scale(cfg_scale), .in_mus(cfg_mus), .in_vol(cfg_vol),
+        .in_auto(cfg_auto),
         .in_meter(cfg_meter),
         .trans(ef_trans), .bright(ef_bright), .contrast(ef_contrast),
         .scale(ef_scale), .mus(ef_mus), .vol(ef_vol), .meter(ef_meter),
+        .auto_en(ef_auto),
         .ver(cfg_ver)
     );
 
@@ -339,6 +347,7 @@ module top_osd_demo #(
     assign dbg_scale  = ef_scale;
     assign dbg_vol    = ef_vol;
     assign dbg_mus    = ef_mus;
+    assign dbg_auto   = ef_auto;
 
     assign raw_de = bg_de;
     assign raw_x  = act_x;

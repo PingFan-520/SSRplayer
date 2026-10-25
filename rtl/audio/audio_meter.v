@@ -21,10 +21,10 @@
 `timescale 1ns / 1ps
 
 module audio_meter #(
-    parameter integer X0   = 320,     // 面板左上角 = 图片框左边界
+    parameter integer X0   = 128,     // 面板左上角（比图片框更宽，铺满 1024）
     parameter integer Y0   = 468,     // 叠在图片下部
-    parameter integer BARW = 8,       // 每根柱子 8 像素（7 实 + 1 空）-> 更窄
-    parameter integer NBAR = 80,      // 80 列 x 8 = 640，正好与图片同宽
+    parameter integer BARW = 8,       // 每根柱子占 8 像素（**5 实 + 3 空**，更细）
+    parameter integer NBAR = 128,     // 128 列 x 8 = 1024 宽
     parameter integer MAXH = 112      // 柱区高度（像素）
 )(
     input  wire        clk,
@@ -80,9 +80,9 @@ module audio_meter #(
     wire [11:0] dy = y - Y0[11:0];
 
     // bars[0] 是最新的一列，画在最右边（示波器/瀑布图习惯）
-    // BARW=8 -> 柱索引 = dx/8（移位，无除法器），柱内 1 像素间隙（dx[2:0]==7）
-    wire [6:0]  bi    = 7'd79 - dx[9:3];
-    wire        ingap = (dx[2:0] == 3'd7);
+    // BARW=8 -> 柱索引 = dx/8（移位）；柱内 5 实 3 空 -> 每根更细
+    wire [6:0]  bi    = 7'd127 - dx[9:3];
+    wire        ingap = (dx[2:0] >= 3'd5);
 
     wire [7:0]  lv = bars[bi];
     // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）
@@ -93,24 +93,32 @@ module audio_meter #(
     wire filled = in_rect && ~ingap && (dy >= thr);
 
     // ------------------------------------------------------------------
-    // 纵向彩虹渐变：红 -> 橙 -> 黄 -> 绿 -> 青 -> 蓝
-    //   （顶部红、底部蓝，频谱仪最常见的配色）
+    // 纵向彩虹渐变：14 级（每 8 像素一级，正好是 dy[6:3]，纯移位不用除法）
+    //   顶部红/玫红 -> 橙 -> 黄 -> 绿 -> 青 -> 蓝 -> 紫（底部）
+    //   级别越多，渐变越细腻（参考 Music-Spectrum 的 128 级彩虹表思路，
+    //   这里只用 14 级 case，零 ROM 零乘法器）
     // ------------------------------------------------------------------
-    localparam [11:0] Z1 = (MAXH * 16) / 100;   // 16%
-    localparam [11:0] Z2 = (MAXH * 32) / 100;   // 32%
-    localparam [11:0] Z3 = (MAXH * 48) / 100;   // 48%
-    localparam [11:0] Z4 = (MAXH * 66) / 100;   // 66%
-    localparam [11:0] Z5 = (MAXH * 84) / 100;   // 84%
+    wire [3:0] zc = dy[6:3];
 
     reg [23:0] col;
 
     always @(*) begin
-        if      (dy < Z1) col = 24'hFF2A18;     // 红
-        else if (dy < Z2) col = 24'hFF8C1A;     // 橙
-        else if (dy < Z3) col = 24'hFFE01E;     // 黄
-        else if (dy < Z4) col = 24'h3CE03C;     // 绿
-        else if (dy < Z5) col = 24'h26D2F0;     // 青
-        else              col = 24'h3355FF;     // 蓝
+        case (zc)
+            4'd0:  col = 24'hFF1040;   // 玫红
+            4'd1:  col = 24'hFF2A18;   // 红
+            4'd2:  col = 24'hFF5A10;   // 朱红
+            4'd3:  col = 24'hFF8C1A;   // 橙
+            4'd4:  col = 24'hFFC01E;   // 琥珀
+            4'd5:  col = 24'hFFE81E;   // 黄
+            4'd6:  col = 24'hC8F020;   // 黄绿
+            4'd7:  col = 24'h3CE03C;   // 绿
+            4'd8:  col = 24'h20E890;   // 青绿
+            4'd9:  col = 24'h26D2F0;   // 青
+            4'd10: col = 24'h2AA0FF;   // 天蓝
+            4'd11: col = 24'h3355FF;   // 蓝
+            4'd12: col = 24'h7038F0;   // 靛
+            default: col = 24'hA050FF; // 紫
+        endcase
     end
 
     // 输出寄存一拍：上层用 xd3/yd3（比视频早一拍）算，寄存后正好与视频对齐。

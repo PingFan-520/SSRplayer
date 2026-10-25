@@ -17,6 +17,7 @@ module cfg_latch (
     input  wire [3:0] in_contrast,
     input  wire [1:0] in_scale,
     input  wire [2:0] in_mus,
+    input  wire       in_auto,
     input  wire [3:0] in_vol,
     input  wire       in_meter,
 
@@ -25,6 +26,7 @@ module cfg_latch (
     output reg  [3:0] contrast,
     output reg  [1:0] scale,
     output reg  [2:0] mus,
+    output reg        auto_en,
     output reg  [3:0] vol,
     output reg        meter,
 
@@ -38,6 +40,7 @@ module cfg_latch (
             contrast <= 4'd10;
             scale    <= 2'd0;
             mus      <= 3'd1;
+            auto_en  <= 1'b1;
             meter    <= 1'b1;
             vol      <= 4'd6;
             ver      <= 4'd0;
@@ -47,6 +50,7 @@ module cfg_latch (
             contrast <= in_contrast;
             scale    <= in_scale;
             mus      <= in_mus;
+            auto_en  <= in_auto;
             meter    <= in_meter;
             vol      <= in_vol;
             ver      <= ver + 4'd1;

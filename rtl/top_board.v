@@ -212,13 +212,16 @@ module top_board #(
     wire [1:0]  dbg_effect;         // 菜单里选的转场特效（提前声明，FSM 要用）
     wire [1:0]  dbg_scale;          // 菜单里选的缩放档位（给 bmp_scale）
     wire [3:0]  dbg_vol;            // 菜单音量 0..10
-    wire [2:0]  dbg_mus;            // 菜单 MUS：0=关 1=内置音阶 2..5=SD 曲目 1..4
+    wire [2:0]  dbg_mus;            // 菜单 MUS：0=关 1=内置 2..=SD 曲目
+    wire        dbg_auto;           // 1=自动轮播
+    wire        nav_next, nav_prev;  // 非菜单态下 KEY1/KEY2：下一张/上一张
     wire [7:0]  aud_lvl;            // 音频包络（给电平表）
 
     // 淡入淡出转场：255=正常亮度，0=全黑。换 bank 发生在全黑那一刻，看不见。
     reg  [7:0]  fade_lvl;
     reg         img_changed;        // 换图脉冲（给转场做淡入）
     reg  [1:0]  scale_d;            // 上一次加载用的缩放模式（变了就重载当前图）
+    reg         first_img;          // 1 = 上电首张（不做转场）
 
     // ------------------------------------------------------------------
     // 擦除/推入式转场（菜单 SLIDE / WIPE）
@@ -536,6 +539,7 @@ module top_board #(
             fade_lvl  <= 8'd255;
             img_changed <= 1'b0;
             scale_d   <= 2'd0;
+            first_img <= 1'b1;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
@@ -619,7 +623,17 @@ module top_board #(
                             // 交叉淡化要同时读新旧两个地址，单读口带宽不够，
                             // 所以 FADE 走"中间经过全黑"的经典做法；
                             // SLIDE/WIPE 复用 frame_buffer 的 rd_wipe 分界选 bank。
-                            if (!USE_DBL[0]) begin
+                            if (first_img || !USE_DBL[0]) begin
+                                // 上电首张：直接硬切，不做任何转场
+                                // （正常上电就该立刻出图，而不是先黑一下再淡入）
+                                first_img   <= 1'b0;
+                                rd_bank     <= USE_DBL[0] ? wr_bank : 1'b0;
+                                wr_bank     <= USE_DBL[0] ? ~wr_bank : 1'b0;
+                                rd_bank_new <= USE_DBL[0] ? wr_bank : 1'b0;
+                                rd_wipe     <= 20'd153600;
+                                fade_lvl    <= 8'd255;
+                                ld_st       <= LD_SHOW;
+                            end else if (!USE_DBL[0]) begin
                                 // 单缓冲：没有第二块可读，只能硬切
                                 rd_bank     <= 1'b0;
                                 wr_bank     <= 1'b0;
@@ -760,7 +774,8 @@ module top_board #(
                     // 都会让下半帧从另一块 bank 取数（那正是"横缝 + 下半重复"的成因）
                     rd_wipe     <= 20'd153600;
                     rd_bank_new <= rd_bank;
-                    if (frame_top) hold_frm <= hold_frm + 16'd1;
+                    // 手动切图（KEY1/KEY2）优先；自动轮播要菜单里开着才走
+                    if (frame_top && dbg_auto) hold_frm <= hold_frm + 16'd1;
 
                     // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
                     // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
@@ -774,9 +789,15 @@ module top_board #(
                         fin_dly   <= 13'd0;
                         hold_frm  <= 16'd0;
                         ld_st     <= LD_CLEAR;
-                    end else if (hold_frm >= HOLD_FRM[15:0]) begin
-                        img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
-                                                                     : (img_idx + 8'd1);
+                    end else if (nav_next || nav_prev ||
+                                 (dbg_auto && (hold_frm >= HOLD_FRM[15:0]))) begin
+                        // 下一张 / 上一张 / 自动轮播到点
+                        if (nav_prev)
+                            img_idx <= (img_idx == 8'd0) ? (IMG_NUM[7:0] - 8'd1)
+                                                         : (img_idx - 8'd1);
+                        else
+                            img_idx <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
+                                                                        : (img_idx + 8'd1);
                         scale_d   <= dbg_scale;
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
@@ -827,13 +848,17 @@ module top_board #(
         .MUS_NUM(MUS_NUM)
     ) u_core (
         .clk(clk_pix), .rst_n(rst_n),
-        .key({key2, key4, key3, key1}),      // {OK, DOWN, UP, MENU}
+        // 按键重新分配（贴合"音乐相框"的用法）：
+        //   KEY1 -> DOWN：切换下一张     KEY2 -> UP  ：切换上一张
+        //   KEY3 -> OK  ：音乐列表/确认  KEY4 -> MENU：功能菜单
+        .key({key3, key1, key2, key4}),      // {OK, DOWN, UP, MENU}
         .rgb_out(rgb), .hs_out(hs), .vs_out(vs), .de_out(de),
         .x_out(x), .y_out(y),
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),
         .dbg_prog(dbg_prog), .dbg_effect(dbg_effect), .dbg_scale(dbg_scale),
         .dbg_vol(dbg_vol),
-        .dbg_mus(dbg_mus),
+        .dbg_mus(dbg_mus), .dbg_auto(dbg_auto),
+        .nav_next(nav_next), .nav_prev(nav_prev),
         .seg_sel(seg_sel), .seg_data(seg_data),
         .img_changed(img_changed),
         .fade_lvl(fade_lvl),

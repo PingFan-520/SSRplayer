@@ -48,7 +48,8 @@ def main():
                 r"    reg \[15:0\] hold_frm;", r"    reg        clr_ok;.*?\n",
                 r"    reg \[25:0\] clr_wdog;.*?\n", r"    reg \[27:0\] ld_wdog;.*?\n",
                 r"    reg  \[1:0\]  scale_d;.*?\n",
-                r"    reg         wipe_dir;.*?\n", r"    reg  \[3:0\]  wipe_frm;.*?\n"]:
+                r"    reg         wipe_dir;.*?\n", r"    reg  \[3:0\]  wipe_frm;.*?\n",
+                r"    reg         first_img;.*?\n"]:
         mm = re.search(pat, src)
         if mm:
             decls.append(mm.group(0).rstrip())
@@ -126,6 +127,9 @@ module tb_fsm;
     reg        img_changed;
     reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走淡出/淡入
     reg  [1:0] dbg_scale  = 2'd0;   // 缩放模式（FSM 里做变化检测）
+    reg        dbg_auto   = 1'b1;   // 自动轮播
+    reg        nav_next   = 1'b0;   // KEY1 手动下一张
+    reg        nav_prev   = 1'b0;   // KEY2 手动上一张
     reg  [7:0] fade_lvl;
     reg  [7:0] img_idx;
 

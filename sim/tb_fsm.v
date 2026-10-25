@@ -50,6 +50,9 @@ module tb_fsm;
     reg        img_changed;
     reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走淡出/淡入
     reg  [1:0] dbg_scale  = 2'd0;   // 缩放模式（FSM 里做变化检测）
+    reg        dbg_auto   = 1'b1;   // 自动轮播
+    reg        nav_next   = 1'b0;   // KEY1 手动下一张
+    reg        nav_prev   = 1'b0;   // KEY2 手动上一张
     reg  [7:0] fade_lvl;
     reg  [7:0] img_idx;
 
@@ -62,6 +65,7 @@ module tb_fsm;
     reg  [1:0]  scale_d;            // 上一次加载用的缩放模式（变了就重载当前图）
     reg         wipe_dir;           // 0 = SLIDE 新图从下往上推；1 = WIPE 新图从上往下覆盖
     reg  [3:0]  wipe_frm;           // 已走的帧数（兼作看门狗）
+    reg         first_img;          // 1 = 上电首张（不做转场）
 
     integer shown_cnt;
     initial shown_cnt = 0;
@@ -85,6 +89,7 @@ module tb_fsm;
             fade_lvl  <= 8'd255;
             img_changed <= 1'b0;
             scale_d   <= 2'd0;
+            first_img <= 1'b1;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
@@ -168,7 +173,17 @@ module tb_fsm;
                             // 交叉淡化要同时读新旧两个地址，单读口带宽不够，
                             // 所以 FADE 走"中间经过全黑"的经典做法；
                             // SLIDE/WIPE 复用 frame_buffer 的 rd_wipe 分界选 bank。
-                            if (!USE_DBL[0]) begin
+                            if (first_img || !USE_DBL[0]) begin
+                                // 上电首张：直接硬切，不做任何转场
+                                // （正常上电就该立刻出图，而不是先黑一下再淡入）
+                                first_img   <= 1'b0;
+                                rd_bank     <= USE_DBL[0] ? wr_bank : 1'b0;
+                                wr_bank     <= USE_DBL[0] ? ~wr_bank : 1'b0;
+                                rd_bank_new <= USE_DBL[0] ? wr_bank : 1'b0;
+                                rd_wipe     <= 20'd153600;
+                                fade_lvl    <= 8'd255;
+                                ld_st       <= LD_SHOW;
+                            end else if (!USE_DBL[0]) begin
                                 // 单缓冲：没有第二块可读，只能硬切
                                 rd_bank     <= 1'b0;
                                 wr_bank     <= 1'b0;
@@ -309,7 +324,8 @@ module tb_fsm;
                     // 都会让下半帧从另一块 bank 取数（那正是"横缝 + 下半重复"的成因）
                     rd_wipe     <= 20'd153600;
                     rd_bank_new <= rd_bank;
-                    if (frame_top) hold_frm <= hold_frm + 16'd1;
+                    // 手动切图（KEY1/KEY2）优先；自动轮播要菜单里开着才走
+                    if (frame_top && dbg_auto) hold_frm <= hold_frm + 16'd1;
 
                     // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
                     // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
@@ -323,9 +339,15 @@ module tb_fsm;
                         fin_dly   <= 13'd0;
                         hold_frm  <= 16'd0;
                         ld_st     <= LD_CLEAR;
-                    end else if (hold_frm >= HOLD_FRM[15:0]) begin
-                        img_idx   <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
-                                                                     : (img_idx + 8'd1);
+                    end else if (nav_next || nav_prev ||
+                                 (dbg_auto && (hold_frm >= HOLD_FRM[15:0]))) begin
+                        // 下一张 / 上一张 / 自动轮播到点
+                        if (nav_prev)
+                            img_idx <= (img_idx == 8'd0) ? (IMG_NUM[7:0] - 8'd1)
+                                                         : (img_idx - 8'd1);
+                        else
+                            img_idx <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
+                                                                        : (img_idx + 8'd1);
                         scale_d   <= dbg_scale;
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
