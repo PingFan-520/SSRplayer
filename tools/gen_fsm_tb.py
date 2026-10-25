@@ -47,7 +47,8 @@ def main():
     for pat in [r"    reg \[2:0\]  ld_st;", r"    reg \[12:0\] fin_dly;",
                 r"    reg \[15:0\] hold_frm;", r"    reg        clr_ok;.*?\n",
                 r"    reg \[25:0\] clr_wdog;.*?\n", r"    reg \[27:0\] ld_wdog;.*?\n",
-                r"    reg  \[1:0\]  scale_d;.*?\n"]:
+                r"    reg  \[1:0\]  scale_d;.*?\n",
+                r"    reg         wipe_dir;.*?\n", r"    reg  \[3:0\]  wipe_frm;.*?\n"]:
         mm = re.search(pat, src)
         if mm:
             decls.append(mm.group(0).rstrip())
@@ -147,7 +148,7 @@ module tb_fsm;
           3'd2: n_arm   = n_arm + 1;
           3'd3: n_load  = n_load + 1;
           3'd4: begin n_show = n_show + 1; shown_cnt = shown_cnt + 1; end
-          3'd5, 3'd6: begin
+          3'd5, 3'd6, 3'd7: begin
               n_wipe = n_wipe + 1;
               if (ld_st != prev_st) wipe_cnt = wipe_cnt + 1;
           end
@@ -181,6 +182,29 @@ module tb_fsm;
     end
     always @(negedge clk) if (!rd_en) rdr_done_p <= 1'b0;
 
+    // ---- 模拟：在 SHOW 刚开始那一刻改缩放档位，FSM 应当在 1 帧内重载 ----
+    //   HOLD_FRM=3 时，正常轮播要 3 帧后才进 CLEAR；
+    //   若在 hold_frm==0 时改档位、而 CLEAR 却在 1 帧内出现，说明重载生效。
+    integer tick_cnt = 0, st_change = -1, st_clear = -1;
+    always @(posedge clk) begin
+        tick_cnt = tick_cnt + 1;
+        if (st_change < 0 && (tick_cnt > 800000) && (ld_st == 3'd4) && (hold_frm == 16'd0)) begin
+            dbg_scale = 2'd1;
+            st_change = tick_cnt;
+        end
+        if (st_change > 0 && st_clear < 0 && (ld_st == 3'd1)) st_clear = tick_cnt;
+    end
+
+    // ---- 模拟：把特效切成 SLIDE(1)，验证 LD_WIPE 能进能出 ----
+    //   每帧挪 15360 字（48 行），11 步 + 收尾 ≈ 12 帧。
+    integer tick2 = 0, wipe_in = -1, wipe_out = -1;
+    always @(posedge clk) begin
+        if (st_change > 0) tick2 = tick2 + 1;
+        if (st_change > 0 && tick2 == 600000) dbg_effect = 2'd1;
+        if (dbg_effect == 2'd1 && wipe_in  < 0 && (ld_st == 3'd7)) wipe_in  = tick_cnt;
+        if (wipe_in > 0 && wipe_out < 0 && (ld_st == 3'd4))          wipe_out = tick_cnt;
+    end
+
     // ---- 模拟帧同步 ----
     initial begin
         forever begin
@@ -213,6 +237,27 @@ module tb_fsm;
         $display("[fsm] 清屏 %0d 次，平均 %0d 拍/次（期望约 3803）", clr_cnt, n_clear/clr_cnt);
         $display("[fsm] 淡出+淡入 %0d 次，平均 %0d 拍/次（期望约 18 帧 = 360000 拍）",
                  wipe_cnt, (wipe_cnt==0) ? 0 : n_wipe/wipe_cnt);
+        if (st_change < 0) begin
+            $display("[FAIL] 测试没触发缩放档位变化（激励没跑到）");
+        end else if (st_clear < 0) begin
+            $display("[FAIL] 改缩放档位后 FSM 没有重载（一直不进 CLEAR）");
+        end else if ((st_clear - st_change) > 20000) begin
+            $display("[FAIL] 改档位后 %0d 拍才重载，超过 1 帧（应 < 20000）",
+                     st_clear - st_change);
+        end else
+            $display("[ok] 改缩放档位后 %0d 拍触发重载", st_clear - st_change);
+
+        if (wipe_in < 0) begin
+            $display("[FAIL] 特效切 SLIDE 后没进 LD_WIPE");
+        end else if (wipe_out < 0) begin
+            $display("[FAIL] LD_WIPE 卡住没回到 SHOW");
+        end else if ((wipe_out - wipe_in) > 400000) begin
+            $display("[FAIL] LD_WIPE 用了 %0d 拍（>20 帧），可能走看门狗",
+                     wipe_out - wipe_in);
+        end else
+            $display("[ok] SLIDE 擦除转场 %0d 拍完成（约 %0d 帧）",
+                     wipe_out - wipe_in, (wipe_out - wipe_in) / 20000);
+
         if ((n_clear/clr_cnt) > 6000) begin
             $display("[FAIL] CLEAR 平均 %0d 拍，疑似死锁/走看门狗", n_clear/clr_cnt);
         end else if (n_show < 100000) begin

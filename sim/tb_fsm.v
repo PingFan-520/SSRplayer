@@ -38,6 +38,7 @@ module tb_fsm;
                      LD_LOAD  = 3'd3,
                      LD_FADE_OUT = 3'd5,  // 淡出到黑
                      LD_FADE_IN  = 3'd6,  // 从黑淡入新图（换 bank 在两者之间完成）
+                     LD_WIPE     = 3'd7,  // 擦除/推入（按 rd_wipe 分界选 bank）
                      LD_SHOW  = 3'd4;
 
     reg        rd_en;
@@ -59,6 +60,8 @@ module tb_fsm;
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
     reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
     reg  [1:0]  scale_d;            // 上一次加载用的缩放模式（变了就重载当前图）
+    reg         wipe_dir;           // 0 = SLIDE 新图从下往上推；1 = WIPE 新图从上往下覆盖
+    reg  [3:0]  wipe_frm;           // 已走的帧数（兼作看门狗）
 
     integer shown_cnt;
     initial shown_cnt = 0;
@@ -75,6 +78,10 @@ module tb_fsm;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
+            rd_bank_new <= 1'b0;
+            rd_wipe   <= 20'd153600;
+            wipe_dir  <= 1'b0;
+            wipe_frm  <= 4'd0;
             fade_lvl  <= 8'd255;
             img_changed <= 1'b0;
             scale_d   <= 2'd0;
@@ -153,17 +160,58 @@ module tb_fsm;
                             ld_wdog   <= 28'd0;
                             load_mode <= 1'b0;
                             hold_frm  <= 16'd0;
-                            // 转场：淡出到黑 -> 换 bank（黑屏时切，看不见）-> 淡入新图。
-                            // 交叉淡化需要同时读新旧两个地址，单读口带宽不够，
-                            // 所以用"中间经过一帧全黑"的经典做法。
-                            if (USE_DBL[0] && (dbg_effect != 2'd3)) begin
-                                fade_lvl <= 8'd224;      // 从接近满亮度开始往下降
-                                ld_st    <= LD_FADE_OUT;
+                            // 转场：按菜单里选的特效分四种
+                            //   FADE(0)  淡出到黑 -> 换 bank（看不见）-> 淡入
+                            //   SLIDE(1) 新图从下往上推入（分界 153600 -> 0）
+                            //   WIPE(2)  新图从上往下覆盖（分界 0 -> 153600）
+                            //   CUT(3)   硬切
+                            // 交叉淡化要同时读新旧两个地址，单读口带宽不够，
+                            // 所以 FADE 走"中间经过全黑"的经典做法；
+                            // SLIDE/WIPE 复用 frame_buffer 的 rd_wipe 分界选 bank。
+                            if (!USE_DBL[0]) begin
+                                // 单缓冲：没有第二块可读，只能硬切
+                                rd_bank     <= 1'b0;
+                                wr_bank     <= 1'b0;
+                                rd_bank_new <= 1'b0;
+                                rd_wipe     <= 20'd153600;
+                                fade_lvl    <= 8'd255;
+                                ld_st       <= LD_SHOW;
                             end else begin
-                                rd_bank  <= USE_DBL[0] ? wr_bank : 1'b0;
-                                wr_bank  <= USE_DBL[0] ? ~wr_bank : 1'b0;
-                                fade_lvl <= 8'd255;
-                                ld_st    <= LD_SHOW;
+                                case (dbg_effect)
+                                    2'd0: begin      // FADE
+                                        fade_lvl <= 8'd255;
+                                        rd_bank_new <= wr_bank;
+                                        rd_wipe     <= 20'd153600;
+                                        ld_st       <= LD_FADE_OUT;
+                                    end
+                                    2'd1: begin      // SLIDE：新图从下往上推
+                                        rd_bank_new <= wr_bank;      // 新图
+                                        rd_wipe     <= 20'd153600;   // 先全读旧图
+                                        wipe_dir    <= 1'b0;
+                                        wipe_frm    <= 4'd0;
+                                        fade_lvl    <= 8'd255;
+                                        ld_st       <= LD_WIPE;
+                                    end
+                                    2'd2: begin      // WIPE：新图从上往下覆盖
+                                        // 交换角色：rd_bank 放新图、rd_bank_new 放旧图，
+                                        // 分界 0 -> 153600，上半部分逐帧变成新图。
+                                        rd_bank_new <= rd_bank;      // 旧图
+                                        rd_bank     <= wr_bank;      // 新图
+                                        rd_wipe     <= 20'd0;
+                                        wipe_dir    <= 1'b1;
+                                        wipe_frm    <= 4'd0;
+                                        fade_lvl    <= 8'd255;
+                                        ld_st       <= LD_WIPE;
+                                    end
+                                    default: begin   // CUT：硬切
+                                        rd_bank     <= wr_bank;
+                                        rd_bank_new <= wr_bank;
+                                        rd_wipe     <= 20'd153600;
+                                        wr_bank     <= ~wr_bank;
+                                        fade_lvl    <= 8'd255;
+                                        ld_st       <= LD_SHOW;
+                                    end
+                                endcase
                             end
                         end else begin
                             fin_dly <= fin_dly + 13'd1;
@@ -197,6 +245,60 @@ module tb_fsm;
                             ld_st    <= LD_SHOW;
                         end else begin
                             fade_lvl <= fade_lvl + 8'd32;
+                        end
+                    end
+                end
+
+                // ------------------------------------------------------------------
+                // 擦除/推入转场：每帧把分界挪 15360 字（= 48 行），11 帧走完。
+                //   分界恒 4 字对齐（153600 / 15360 / 320 都能被 4 整除），
+                //   4 字 burst 绝不会跨 bank。
+                //   wipe_dir=0（SLIDE）：153600 -> 0，新图从下往上推入；
+                //   wipe_dir=1（WIPE） ：0 -> 153600，新图从上往下覆盖。
+                //   只在 frame_top 改分界（此时 rd_cnt 正在归零），不会半帧撕裂。
+                // ------------------------------------------------------------------
+                LD_WIPE: begin
+                    if (frame_top) begin
+                        if (wipe_frm >= 4'd13) begin
+                            // 看门狗：无论什么情况，13 帧内必定收尾，不会卡死
+                            rd_wipe     <= 20'd153600;
+                            rd_bank     <= wipe_dir ? rd_bank : rd_bank_new;
+                            rd_bank_new <= wipe_dir ? rd_bank : rd_bank_new;
+                            wr_bank     <= ~(wipe_dir ? rd_bank : rd_bank_new);
+                            wipe_frm    <= 4'd0;
+                            hold_frm    <= 16'd0;
+                            ld_st       <= LD_SHOW;
+                        end else begin
+                            wipe_frm <= wipe_frm + 4'd1;
+                            if (!wipe_dir) begin
+                                if (rd_wipe == 20'd0) begin
+                                    // 已经整幅是新图，下一帧正式切换
+                                    rd_bank     <= rd_bank_new;
+                                    rd_bank_new <= rd_bank_new;
+                                    wr_bank     <= ~rd_bank_new;
+                                    wipe_frm    <= 4'd0;
+                                    hold_frm    <= 16'd0;
+                                    ld_st       <= LD_SHOW;
+                                end else if (rd_wipe <= 20'd15360) begin
+                                    rd_wipe <= 20'd0;
+                                end else begin
+                                    rd_wipe <= rd_wipe - 20'd15360;
+                                end
+                            end else begin
+                                if (rd_wipe >= 20'd153600) begin
+                                    rd_bank     <= rd_bank;      // WIPE 里 rd_bank 已经是新图
+                                    rd_bank_new <= rd_bank;
+                                    wr_bank     <= ~rd_bank;
+                                    rd_wipe     <= 20'd153600;
+                                    wipe_frm    <= 4'd0;
+                                    hold_frm    <= 16'd0;
+                                    ld_st       <= LD_SHOW;
+                                end else if (rd_wipe >= 20'd138240) begin
+                                    rd_wipe <= 20'd153600;
+                                end else begin
+                                    rd_wipe <= rd_wipe + 20'd15360;
+                                end
+                            end
                         end
                     end
                 end
@@ -250,7 +352,7 @@ module tb_fsm;
           3'd2: n_arm   = n_arm + 1;
           3'd3: n_load  = n_load + 1;
           3'd4: begin n_show = n_show + 1; shown_cnt = shown_cnt + 1; end
-          3'd5, 3'd6: begin
+          3'd5, 3'd6, 3'd7: begin
               n_wipe = n_wipe + 1;
               if (ld_st != prev_st) wipe_cnt = wipe_cnt + 1;
           end
@@ -284,6 +386,29 @@ module tb_fsm;
     end
     always @(negedge clk) if (!rd_en) rdr_done_p <= 1'b0;
 
+    // ---- 模拟：在 SHOW 刚开始那一刻改缩放档位，FSM 应当在 1 帧内重载 ----
+    //   HOLD_FRM=3 时，正常轮播要 3 帧后才进 CLEAR；
+    //   若在 hold_frm==0 时改档位、而 CLEAR 却在 1 帧内出现，说明重载生效。
+    integer tick_cnt = 0, st_change = -1, st_clear = -1;
+    always @(posedge clk) begin
+        tick_cnt = tick_cnt + 1;
+        if (st_change < 0 && (tick_cnt > 800000) && (ld_st == 3'd4) && (hold_frm == 16'd0)) begin
+            dbg_scale = 2'd1;
+            st_change = tick_cnt;
+        end
+        if (st_change > 0 && st_clear < 0 && (ld_st == 3'd1)) st_clear = tick_cnt;
+    end
+
+    // ---- 模拟：把特效切成 SLIDE(1)，验证 LD_WIPE 能进能出 ----
+    //   每帧挪 15360 字（48 行），11 步 + 收尾 ≈ 12 帧。
+    integer tick2 = 0, wipe_in = -1, wipe_out = -1;
+    always @(posedge clk) begin
+        if (st_change > 0) tick2 = tick2 + 1;
+        if (st_change > 0 && tick2 == 600000) dbg_effect = 2'd1;
+        if (dbg_effect == 2'd1 && wipe_in  < 0 && (ld_st == 3'd7)) wipe_in  = tick_cnt;
+        if (wipe_in > 0 && wipe_out < 0 && (ld_st == 3'd4))          wipe_out = tick_cnt;
+    end
+
     // ---- 模拟帧同步 ----
     initial begin
         forever begin
@@ -316,6 +441,27 @@ module tb_fsm;
         $display("[fsm] 清屏 %0d 次，平均 %0d 拍/次（期望约 3803）", clr_cnt, n_clear/clr_cnt);
         $display("[fsm] 淡出+淡入 %0d 次，平均 %0d 拍/次（期望约 18 帧 = 360000 拍）",
                  wipe_cnt, (wipe_cnt==0) ? 0 : n_wipe/wipe_cnt);
+        if (st_change < 0) begin
+            $display("[FAIL] 测试没触发缩放档位变化（激励没跑到）");
+        end else if (st_clear < 0) begin
+            $display("[FAIL] 改缩放档位后 FSM 没有重载（一直不进 CLEAR）");
+        end else if ((st_clear - st_change) > 20000) begin
+            $display("[FAIL] 改档位后 %0d 拍才重载，超过 1 帧（应 < 20000）",
+                     st_clear - st_change);
+        end else
+            $display("[ok] 改缩放档位后 %0d 拍触发重载", st_clear - st_change);
+
+        if (wipe_in < 0) begin
+            $display("[FAIL] 特效切 SLIDE 后没进 LD_WIPE");
+        end else if (wipe_out < 0) begin
+            $display("[FAIL] LD_WIPE 卡住没回到 SHOW");
+        end else if ((wipe_out - wipe_in) > 400000) begin
+            $display("[FAIL] LD_WIPE 用了 %0d 拍（>20 帧），可能走看门狗",
+                     wipe_out - wipe_in);
+        end else
+            $display("[ok] SLIDE 擦除转场 %0d 拍完成（约 %0d 帧）",
+                     wipe_out - wipe_in, (wipe_out - wipe_in) / 20000);
+
         if ((n_clear/clr_cnt) > 6000) begin
             $display("[FAIL] CLEAR 平均 %0d 拍，疑似死锁/走看门狗", n_clear/clr_cnt);
         end else if (n_show < 100000) begin

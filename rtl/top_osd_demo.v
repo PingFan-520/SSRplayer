@@ -194,7 +194,7 @@ module top_osd_demo #(
 
     wire [23:0] trans_rgb;
     wire [7:0] prog_use = USE_EXT ? fade_lvl : trans_prog;
-    wire [1:0] eff_use  = USE_EXT ? 2'd0     : ef_trans;   // USE_EXT 固定 FADE
+    wire [1:0] eff_use  = USE_EXT ? 2'd0     : ef_trans;   // USE_EXT 固定走 FADE 通道
 
     transition #(.HACTIVE(HACTIVE)) u_trans (
         .clk(clk), .rst(rst),
@@ -202,6 +202,12 @@ module top_osd_demo #(
         .x(act_x), .effect(eff_use), .prog(prog_use),
         .rgb_out(trans_rgb)
     );
+
+    // 真实图片播放时，转场由帧缓存/状态机完成：
+    //   FADE 用 fade_lvl 控制亮度；SLIDE/WIPE 在帧缓存里按分界选 bank；
+    //   CUT 直接硬切。所以这一级只在"确实要减弱亮度"时才经过 mix8，
+    //   否则 fade_lvl=255 的 mix8 会做 b*255/256（0.4% 无谓掉亮）。
+    wire [23:0] trans_use = (USE_EXT && (fade_lvl == 8'd255)) ? base_a : trans_rgb;
 
     // ------------------------------------------------------------------
     // 亮度 / 对比度
@@ -212,7 +218,7 @@ module top_osd_demo #(
     //   fade_lvl=255 正常显示、=0 全黑。换 bank 发生在全黑那一刻，看不见。
     //   原来的 A/B 交替（彩条）和推入分界都不再使用。
     param_apply u_param (
-        .rgb_in(trans_rgb),
+        .rgb_in(trans_use),
         .bright(ef_bright), .contrast(ef_contrast),
         .rgb_out(adj_rgb)
     );
