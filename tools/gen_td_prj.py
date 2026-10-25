@@ -34,6 +34,7 @@ SOURCES = [
     "rtl/video/bmp_scale.v",
     "rtl/video/pattern_src.v",
     "rtl/audio/tone_gen.v",
+    "rtl/audio/audio_meter.v",
     "rtl/sd/sd_init.v",
     "rtl/sd/sd_read.v",
     "rtl/sd/sd_ctrl_top.v",

@@ -207,6 +207,8 @@ module top_board #(
     reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
     wire [1:0]  dbg_effect;         // 菜单里选的转场特效（提前声明，FSM 要用）
     wire [1:0]  dbg_scale;          // 菜单里选的缩放档位（给 bmp_scale）
+    wire [3:0]  dbg_vol;            // 菜单音量 0..10（给 tone_gen）
+    wire [7:0]  aud_lvl;            // 音频包络（给电平表）
 
     // 淡入淡出转场：255=正常亮度，0=全黑。换 bank 发生在全黑那一刻，看不见。
     reg  [7:0]  fade_lvl;
@@ -792,12 +794,15 @@ module top_board #(
         .x_out(x), .y_out(y),
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),
         .dbg_prog(dbg_prog), .dbg_effect(dbg_effect), .dbg_scale(dbg_scale),
+        .dbg_vol(dbg_vol),
         .seg_sel(seg_sel), .seg_data(seg_data),
         .img_changed(img_changed),
         .fade_lvl(fade_lvl),
         .ext_rgb(fb_rgb),
         .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
-        .dbg_ext(dbg_ext)
+        .dbg_ext(dbg_ext),
+        .aud_lvl(aud_lvl),
+        .aud_meter_en(1'b1)          // 音频电平表常开（想关掉改 0）
     );
 
     // ------------------------------------------------------------------
@@ -839,10 +844,12 @@ module top_board #(
         .clk       (clk_pix),
         .rst       (~rst_n),
         .note_idx  (img_idx),
+        .vol       (dbg_vol),        // 菜单第 6 项：音量 0..10（原来没接）
         .mute      (1'b0),
         .aud_valid (aud_valid),
         .aud_left  (aud_left),
-        .aud_right (aud_right)
+        .aud_right (aud_right),
+        .env_out   (aud_lvl)
     );
 
     wire [9:0] tmds_ch0, tmds_ch1, tmds_ch2, tmds_clk;

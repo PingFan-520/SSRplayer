@@ -59,3 +59,7 @@ sim/fsm*.log
 
 sim/trans*.log
 sim/work_trans/
+
+sim/meter_out.ppm
+sim/work_audio/
+sim/aud*.log

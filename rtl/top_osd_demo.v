@@ -47,6 +47,7 @@ module top_osd_demo #(
     output wire [7:0]  dbg_prog,
     output wire [1:0]  dbg_effect,
     output wire [1:0]  dbg_scale,
+    output wire [3:0]  dbg_vol,      // 菜单音量 0..10（给 tone_gen）
 
     output wire [5:0]  seg_sel,
     output wire [7:0]  seg_data,
@@ -57,7 +58,9 @@ module top_osd_demo #(
     output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
     output wire [11:0] raw_x,
     output wire [11:0] raw_y,        // 帧内行号 0..VTOTAL-1
-    input  wire [7:0]  dbg_ext       // 调试字（SD/轮播状态），显示在数码管
+    input  wire [7:0]  dbg_ext,      // 调试字（SD/轮播状态），显示在数码管
+    input  wire [7:0]  aud_lvl,      // 音频包络（含音量），给电平表
+    input  wire        aud_meter_en  // 1 = 显示音频电平表
 );
 
     wire rst = ~rst_n;
@@ -269,10 +272,39 @@ module top_osd_demo #(
         end
     end
 
+    // 两级混合：先叠菜单，再叠音频电平表（两者区域不重叠，顺序无所谓，
+    // 但放在后面可以保证电平表永远在最上层）
+    wire [23:0] blend_menu;
+
     alpha_blend u_blend (
         .vid_rgb (vd2),
         .osd_rgb (osd_rgb_d),
         .alpha   (osd_alpha_d),
+        .out_rgb (blend_menu)
+    );
+
+    // ------------------------------------------------------------------
+    // 音频电平可视化（扩展要求 5）
+    //   用已对齐到视频的 xd4/yd4 直接算，纯组合，不再增加流水
+    // ------------------------------------------------------------------
+    wire        m_on;
+    wire [23:0] m_rgb;
+    wire [3:0]  m_alpha;
+
+    audio_meter #(
+        .X0(480), .Y0(624), .BARW(8), .NBAR(32), .MAXH(88)
+    ) u_meter (
+        .clk(clk), .rst(rst),
+        .x(xd4), .y(yd4),
+        .level(aud_lvl),
+        .enable(aud_meter_en),
+        .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
+    );
+
+    alpha_blend u_blend_meter (
+        .vid_rgb (blend_menu),
+        .osd_rgb (m_rgb),
+        .alpha   (m_alpha),
         .out_rgb (rgb_out)
     );
 
@@ -285,6 +317,7 @@ module top_osd_demo #(
     assign dbg_prog   = trans_prog;
     assign dbg_effect = ef_trans;
     assign dbg_scale  = ef_scale;
+    assign dbg_vol    = ef_vol;
 
     assign raw_de = bg_de;
     assign raw_x  = act_x;
