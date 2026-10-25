@@ -244,9 +244,10 @@ module osd_menu #(
                     2'd2: g_label = 6'd56;   // 模
                     default: g_label = 6'd57; // 式
                 endcase
-                3'd4: case (i)
-                    2'd0: g_label = 6'd58;   // 字
-                    2'd1: g_label = 6'd59;   // 幕
+                3'd4: case (i)               // MUS（背景音乐开关；原来是没实现的"字幕"）
+                    2'd0: g_label = 6'd12;   // M
+                    2'd1: g_label = 6'd20;   // U
+                    2'd2: g_label = 6'd18;   // S
                     default: g_label = 6'd37;
                 endcase
                 3'd5: case (i)

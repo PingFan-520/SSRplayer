@@ -48,6 +48,7 @@ module top_osd_demo #(
     output wire [1:0]  dbg_effect,
     output wire [1:0]  dbg_scale,
     output wire [3:0]  dbg_vol,      // 菜单音量 0..10（给 tone_gen）
+    output wire        dbg_mus,      // 菜单"背景音乐"开关（给 tone_gen 的 mute）
 
     output wire [5:0]  seg_sel,
     output wire [7:0]  seg_data,
@@ -336,6 +337,7 @@ module top_osd_demo #(
     assign dbg_effect = ef_trans;
     assign dbg_scale  = ef_scale;
     assign dbg_vol    = ef_vol;
+    assign dbg_mus    = ef_sub;
 
     assign raw_de = bg_de;
     assign raw_x  = act_x;
