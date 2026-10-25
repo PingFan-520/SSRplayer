@@ -46,7 +46,7 @@ module tb_fsm;
     reg        rd_bank_new;
     reg  [19:0] rd_wipe;
     reg        img_changed;
-    reg  [1:0] dbg_effect;          // 0=FADE -> 走整幅推入
+    reg  [1:0] dbg_effect = 2'd0;   // 0=FADE -> 走整幅推入
     reg  [7:0] img_idx;
 
     reg [2:0]  ld_st;
@@ -177,12 +177,17 @@ module tb_fsm;
                 // 这样 4 字 burst 绝不会跨 bank，控制器不会读到错位数据。
                 LD_WIPE: begin
                     if (frame_top) begin
-                        if (rd_wipe <= 20'd15360) begin
-                            rd_wipe <= 20'd153600;      // 恢复常值
-                            rd_bank <= rd_bank_new;     // 显示正式切到新图
-                            wr_bank <= ~rd_bank_new;    // 下一张写另一块
+                        if (rd_wipe == 20'd0) begin
+                            // 分界已经推到底（整幅都是新图），下一帧收工。
+                            // 收工条件必须等 rd_wipe 真的到 0：
+                            // 若在 15360 就收工，顶部 48 行还停在旧图，下一帧会"跳"一下。
+                            rd_wipe  <= 20'd153600;     // 恢复常值
+                            rd_bank  <= rd_bank_new;    // 显示正式切到新图
+                            wr_bank  <= ~rd_bank_new;   // 下一张写另一块
                             hold_frm <= 16'd0;
                             ld_st    <= LD_SHOW;
+                        end else if (rd_wipe <= 20'd15360) begin
+                            rd_wipe <= 20'd0;           // 最后一步：整幅切到新图
                         end else begin
                             rd_wipe <= rd_wipe - 20'd15360;
                         end
@@ -212,6 +217,7 @@ module tb_fsm;
     reg [2:0] prev_st;
     initial prev_st = 3'd0;
     integer n_wait = 0, n_clear = 0, n_arm = 0, n_load = 0, n_show = 0, clr_cnt = 0;
+    integer n_wipe = 0, wipe_cnt = 0;
     always @(posedge clk) begin
         case (ld_st)
           3'd0: n_wait  = n_wait + 1;
@@ -219,6 +225,10 @@ module tb_fsm;
           3'd2: n_arm   = n_arm + 1;
           3'd3: n_load  = n_load + 1;
           3'd4: begin n_show = n_show + 1; shown_cnt = shown_cnt + 1; end
+          3'd5: begin
+              n_wipe = n_wipe + 1;
+              if (ld_st != prev_st) wipe_cnt = wipe_cnt + 1;
+          end
         endcase
     end
 
@@ -279,6 +289,8 @@ module tb_fsm;
                  n_wait, n_clear, n_arm, n_load, n_show);
         if (clr_cnt == 0) clr_cnt = 1;
         $display("[fsm] 清屏 %0d 次，平均 %0d 拍/次（期望约 3803）", clr_cnt, n_clear/clr_cnt);
+        $display("[fsm] 推入转场 %0d 次，平均 %0d 拍/次（期望约 11 帧 = 220000 拍）",
+                 wipe_cnt, (wipe_cnt==0) ? 0 : n_wipe/wipe_cnt);
         if ((n_clear/clr_cnt) > 6000) begin
             $display("[FAIL] CLEAR 平均 %0d 拍，疑似死锁/走看门狗", n_clear/clr_cnt);
         end else if (n_show < 100000) begin

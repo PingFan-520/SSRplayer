@@ -577,12 +577,17 @@ module top_board #(
                 // 这样 4 字 burst 绝不会跨 bank，控制器不会读到错位数据。
                 LD_WIPE: begin
                     if (frame_top) begin
-                        if (rd_wipe <= 20'd15360) begin
-                            rd_wipe <= 20'd153600;      // 恢复常值
-                            rd_bank <= rd_bank_new;     // 显示正式切到新图
-                            wr_bank <= ~rd_bank_new;    // 下一张写另一块
+                        if (rd_wipe == 20'd0) begin
+                            // 分界已经推到底（整幅都是新图），下一帧收工。
+                            // 收工条件必须等 rd_wipe 真的到 0：
+                            // 若在 15360 就收工，顶部 48 行还停在旧图，下一帧会"跳"一下。
+                            rd_wipe  <= 20'd153600;     // 恢复常值
+                            rd_bank  <= rd_bank_new;    // 显示正式切到新图
+                            wr_bank  <= ~rd_bank_new;   // 下一张写另一块
                             hold_frm <= 16'd0;
                             ld_st    <= LD_SHOW;
+                        end else if (rd_wipe <= 20'd15360) begin
+                            rd_wipe <= 20'd0;           // 最后一步：整幅切到新图
                         end else begin
                             rd_wipe <= rd_wipe - 20'd15360;
                         end
