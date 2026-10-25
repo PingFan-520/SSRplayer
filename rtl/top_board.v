@@ -40,11 +40,11 @@ module top_board #(
     // SD 卡上的图片布局（裸扇区，PC 端用 tools/make_sd_image.py 生成镜像）
     parameter integer SEC_BASE   = 2048,      // 第 0 张图起始扇区（1MB 偏移）
     parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
-    parameter integer IMG_NUM    = 8,         // 循环张数
+    parameter integer IMG_NUM    = 3,         // 循环张数（图片资源/ 里的 BMP 数）
     // 音乐区（tools/make_sd_image.py 会打印这三个数）
-    parameter integer MUS_BASE   = 45312,     // 音乐区起始扇区
-    parameter integer MUS_STRIDE = 8952,      // 每首占的扇区数
-    parameter integer MUS_NUM    = 4,         // 曲目数
+    parameter integer MUS_BASE   = 18272,     // 音乐区起始扇区
+    parameter integer MUS_STRIDE = 49328,     // 每首占的扇区数
+    parameter integer MUS_NUM    = 2,         // 曲目数
     parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
     // 双缓冲开关：1 = 双缓冲（换图/淡入淡出转场必须用它）；0 = 单缓冲（换图黑一下）
     //   ★ 2026-10-25：从 0 改回 1。

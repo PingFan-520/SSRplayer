@@ -63,3 +63,6 @@ sim/work_trans/
 sim/meter_out.ppm
 sim/work_audio/
 sim/aud*.log
+
+sim/wav_in.wav
+音乐资源/

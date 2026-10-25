@@ -133,6 +133,7 @@ module tb_wav;
     integer    ncap = 0;
     integer    nval = 0;
     integer    lvl_lo = 255, lvl_hi = 0;
+    integer    lvl_bad = 0;
 
     always @(posedge clk) begin
         if (aud_valid) begin
@@ -151,6 +152,7 @@ module tb_wav;
     integer sec_expect = 0;
     integer sec_bad = 0;
     integer sec_first = -1;
+
     always @(posedge clk_sd) begin
         if (s_start) begin
             if (sec_first < 0) sec_first = s_sec;
@@ -159,7 +161,7 @@ module tb_wav;
                     $display("[ERR] 扇区序号错: 得到 %0d 期望 %0d", s_sec, sec_expect);
                 sec_bad = sec_bad + 1;
             end
-            sec_expect = (s_sec == 32'hFFFFFFFF) ? 0 : s_sec + 1;
+            sec_expect = s_sec + 1;
         end
     end
 
@@ -207,12 +209,26 @@ module tb_wav;
         if (sec_bad != 0) $display("[FAIL] 扇区序列有 %0d 处不对", sec_bad);
         else              $display("[ok] 扇区地址连续（首扇区 %0d）", sec_first);
 
-        if ((lvl_hi > lvl_lo) && (lvl_hi > 8))
-            $display("[ok] 电平在变（%0d..%0d）", lvl_lo, lvl_hi);
-        else
-            $display("[FAIL] 电平没有变化（%0d..%0d）", lvl_lo, lvl_hi);
+        // 电平应当与"这段时间内文件里的峰值"一致（歌曲开头可能是静音，不能假设非零）
+        begin : chk_lvl
+            integer j, exp_pk, got_pk;
+            exp_pk = 0;
+            for (j = 0; j < total_smp; j = j + 1) begin
+                got_pk = {mem[hdr_bytes + j*2 + 1], mem[hdr_bytes + j*2]};
+                if (got_pk > 32767) got_pk = 65536 - got_pk;   // 负数
+                if (got_pk > exp_pk) exp_pk = got_pk;
+            end
+            exp_pk = exp_pk >> 7;
+            $display("[info] 峰值: 文件 %0d, 电平输出 %0d..%0d", exp_pk, lvl_lo, lvl_hi);
+            if ((lvl_hi <= exp_pk + 1) && (lvl_hi + 1 >= exp_pk))
+                $display("[ok] 电平与文件峰值一致");
+            else begin
+                $display("[FAIL] 电平 %0d 与文件峰值 %0d 不符", lvl_hi, exp_pk);
+                lvl_bad = 1;
+            end
+        end
 
-        if (bad == 0 && sec_bad == 0 && lvl_hi > lvl_lo)
+        if (bad == 0 && sec_bad == 0 && lvl_bad == 0)
             $display("[PASS] wav_player 全部用例通过");
         else
             $display("[FAIL] wav_player 有错误");

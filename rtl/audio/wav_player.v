@@ -76,6 +76,11 @@ module wav_player #(
                      S_REQ  = 3'd1,   // 已发请求，等 256 个字
                      S_NEXT = 3'd2;   // 一个扇区收完，等 busy 落下
 
+    // FIFO 状态（声明要放在使用它的状态机之前）
+    wire        fifo_full, fifo_empty, fifo_rvld;
+    wire [15:0] fifo_dout;
+    wire [10:0] fifo_used;
+
     reg [2:0]  st;
     reg [31:0] sec_cnt;           // 本曲第几个扇区
     reg [8:0]  wcnt;              // 本扇区已收字数
@@ -88,7 +93,8 @@ module wav_player #(
     // 由头部长度算出的扇区数（组合，头部一收齐就生效；异常时退回 stride）
     wire [31:0] len_b    = {len_hi, len_lo};
     wire [31:0] sl_raw   = ((len_b >> 1) + 32'd255) >> 8;
-    wire [31:0] sl       = ((sl_raw == 32'd0) || (sl_raw > SEC_STRIDE[31:0]))
+    // 长度太短（<8 扇区，约 2 秒）或超出配额，都认为头没读对，退回整段 stride
+    wire [31:0] sl       = ((sl_raw < 32'd8) || (sl_raw > SEC_STRIDE[31:0]))
                            ? SEC_STRIDE[31:0] : sl_raw;
 
     always @(posedge clk_sd or posedge rst) begin
@@ -131,7 +137,9 @@ module wav_player #(
 
                 S_NEXT: begin
                     s_req <= 1'b0;
-                    if (!s_busy) begin
+                    // FIFO 快满就先别读：否则写不进去的采样会被直接丢掉
+                    //（仿真里表现为"隔一段少几个采样"）。留 324 字余量 > 一整个扇区。
+                    if (!s_busy && (fifo_used < 11'd700)) begin
                         if (sec_cnt + 32'd1 >= sl) begin
                             sec_cnt <= 32'd0;
                             s_sec   <= trk_base;              // 循环
@@ -160,9 +168,6 @@ module wav_player #(
     // ==================================================================
     // 3) 异步 FIFO：SD 域写、像素域读
     // ==================================================================
-    wire        fifo_full, fifo_empty, fifo_rvld;
-    wire [15:0] fifo_dout;
-    wire [10:0] fifo_used;
     reg         fifo_rd;
     wire        fifo_wr = s_val & ~is_hdr & ~fifo_full;
 

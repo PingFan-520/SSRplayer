@@ -63,31 +63,56 @@ def probe_bmp(path):
     return True, "%dx%d size=%d off=%d" % (w, abs(hh), bf, off)
 
 
-def probe_wav(path):
-    """检查 WAV 是否为"单声道 / 16bit / 48kHz / 头正好 44 字节"
+def read_wav(path):
+    """读 WAV 并返回 (channels, rate, bits, data_bytes)
 
-    为什么要求这么死：
-      RTL 侧的 wav_player 每收一个 16bit SD 字就当**一个采样**用（单声道），
-      并且固定跳过前 22 个字（44 字节头）；不满足这个规格就得在 FPGA 里重采样/拆包，
-      性价比极低。PC 端 ffmpeg 转一下就好：
-          ffmpeg -i in.mp3 -ar 48000 -ac 1 -sample_fmt s16 out.wav
+    只接受 PCM / 单声道 / 16bit / 48kHz。
+    会跳过 LIST 等附加块 —— ffmpeg 默认会插一个 LIST(encoder)，
+    那样 data 就不在 44 字节处，而 RTL 是固定跳 44 字节的，
+    所以这里统一**重写规范头**（见 write_wav_canonical）。
     """
-    import wave as wavelib
-    try:
-        w = wavelib.open(path, "rb")
-    except Exception as e:
-        return False, "打不开: %s" % e
-    ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-    w.close()
+    with open(path, "rb") as f:
+        d = f.read()
+    if d[:4] not in (b"RIFF", b"RF64"):
+        raise ValueError("不是 RIFF/WAV")
+    i, fmt, data = 12, None, None
+    while i + 8 <= len(d):
+        cid = d[i:i+4]
+        sz = struct.unpack("<I", d[i+4:i+8])[0]
+        body = d[i+8:i+8+sz]
+        if cid == b"fmt ":
+            fmt = body
+        elif cid == b"data":
+            data = body
+            break
+        i += 8 + sz + (sz & 1)
+    if fmt is None or data is None:
+        raise ValueError("缺 fmt/data 块")
+    tag = struct.unpack("<H", fmt[0:2])[0]
+    ch = struct.unpack("<H", fmt[2:4])[0]
+    rate = struct.unpack("<I", fmt[4:8])[0]
+    bits = struct.unpack("<H", fmt[14:16])[0]
+    if tag == 0xFFFE and len(fmt) >= 26:      # WAVE_FORMAT_EXTENSIBLE
+        tag = struct.unpack("<H", fmt[24:26])[0]
+        bits = struct.unpack("<H", fmt[18:20])[0]
+    if tag != 1:
+        raise ValueError("不是 PCM（format tag=%d）" % tag)
     if ch != 1:
-        return False, "%d 声道（需要单声道，用 -ac 1 转）" % ch
-    if sw != 2:
-        return False, "%d bit（需要 16bit，用 -sample_fmt s16）" % (sw * 8)
-    if sr != WAV_SR:
-        return False, "%d Hz（需要 48000，用 -ar 48000）" % sr
-    if n <= 0:
-        return False, "没有采样"
-    return True, "%d 采样 (%.1f 秒)" % (n, n / float(WAV_SR))
+        raise ValueError("%d 声道（需要单声道，ffmpeg: -ac 1）" % ch)
+    if bits != 16:
+        raise ValueError("%d bit（需要 16bit，ffmpeg: -sample_fmt s16）" % bits)
+    if rate != WAV_SR:
+        raise ValueError("%d Hz（需要 48000，ffmpeg: -ar 48000）" % rate)
+    return ch, rate, bits, data
+
+
+def wav_canonical(data):
+    """把 PCM 数据包成 44 字节规范头（RTL 固定跳 22 个字）"""
+    n = len(data)
+    hdr = b"RIFF" + struct.pack("<I", 36 + n) + b"WAVE"
+    hdr += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, WAV_SR, WAV_SR * 2, 2, 16)
+    hdr += b"data" + struct.pack("<I", n)
+    return hdr + data
 
 
 def sectors(n):
@@ -139,13 +164,15 @@ def main():
     # ---- 音乐区：紧接图片区，每首占固定扇区数 ----
     wav_info = []
     for p in wavs:
-        ok, msg = probe_wav(p)
-        if not ok:
-            raise SystemExit("%s : %s" % (os.path.basename(p), msg))
-        wav_info.append((p, os.path.getsize(p), msg))
+        try:
+            ch, rate, bits, data = read_wav(p)
+        except Exception as e:
+            raise SystemExit("%s : %s" % (os.path.basename(p), e))
+        blob = wav_canonical(data)
+        wav_info.append((p, blob, "%d 采样 (%.1f 秒)" % (len(data) // 2, len(data) / 2.0 / WAV_SR)))
 
     mus_base   = SEC_BASE + len(files) * stride
-    mus_stride = max([sectors(sz) for _, sz, _ in wav_info]) if wav_info else 0
+    mus_stride = max([sectors(len(b)) for _, b, _ in wav_info]) if wav_info else 0
     mus_bytes  = mus_stride * SEC_SIZE
 
     total = (mus_base + len(wav_info) * mus_stride) * SEC_SIZE
@@ -160,16 +187,15 @@ def main():
         print("[%d] %-40s %7d 字节 @扇区 %-6d %s"
               % (i, os.path.basename(p), len(data), SEC_BASE + i * stride, msg))
 
+    # ---- 写音乐区 ----
+    for i, (p, blob, msg) in enumerate(wav_info):
+        base = (mus_base + i * mus_stride) * SEC_SIZE
+        buf[base:base + len(blob)] = blob
+        print("[M%d] %-39s %7d 字节 @扇区 %-6d %s"
+              % (i + 1, os.path.basename(p), len(blob), mus_base + i * mus_stride, msg))
+
     with open(out, "wb") as f:
         f.write(buf)
-
-    # ---- 写音乐区 ----
-    for i, (p, sz, msg) in enumerate(wav_info):
-        data = open(p, "rb").read()
-        base = (mus_base + i * mus_stride) * SEC_SIZE
-        buf[base:base + len(data)] = data
-        print("[M%d] %-39s %7d 字节 @扇区 %-6d %s"
-              % (i + 1, os.path.basename(p), len(data), mus_base + i * mus_stride, msg))
 
     print("-" * 74)
     print("共 %d 张图、%d 首音乐，镜像 %d 字节 (%.2f MB)"
