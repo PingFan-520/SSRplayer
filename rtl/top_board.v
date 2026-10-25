@@ -200,6 +200,7 @@ module top_board #(
 
     reg         load_mode;
     reg         rd_bank, wr_bank;   // 双缓冲：显示 A 时写 B，反之亦然
+    reg         img_changed;        // 换图脉冲（给转场做淡入）
 
     // 图片区在屏幕上的位置（与 frame_buffer 的 IMG_X0/IMG_Y0 保持一致）
     localparam integer IMG_X0 = 320;
@@ -464,9 +465,12 @@ module top_board #(
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
+            img_changed <= 1'b0;
             fin_dly   <= 13'd0;
             hold_frm  <= 16'd0;
         end else begin
+            if (ld_st != LD_LOAD) img_changed <= 1'b0;
+
             case (ld_st)
                 LD_WAIT: begin
                     if (sd_ready) begin
@@ -535,6 +539,7 @@ module top_board #(
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             ld_wdog   <= 28'd0;
+                            img_changed <= 1'b1;      // 换图：触发一次淡入转场
                             if (USE_DBL[0]) begin
                                 rd_bank <= wr_bank;   // 显示切到刚写好的那块
                                 wr_bank <= ~wr_bank;  // 下一张写另一块
@@ -608,6 +613,7 @@ module top_board #(
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),
         .dbg_prog(dbg_prog), .dbg_effect(dbg_effect),
         .seg_sel(seg_sel), .seg_data(seg_data),
+        .img_changed(img_changed),
         .ext_rgb(fb_rgb),
         .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
         .dbg_ext(dbg_ext)

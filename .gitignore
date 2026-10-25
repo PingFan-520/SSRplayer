@@ -56,3 +56,6 @@ sim/scale_in.bmp
 
 sim/work_fsm/
 sim/fsm*.log
+
+sim/trans*.log
+sim/work_trans/

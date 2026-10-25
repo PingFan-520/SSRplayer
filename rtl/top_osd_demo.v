@@ -50,6 +50,7 @@ module top_osd_demo #(
     output wire [5:0]  seg_sel,
     output wire [7:0]  seg_data,
 
+    input  wire        img_changed,  // 换图脉冲（双缓冲换 bank 时给一拍）
     input  wire [15:0] ext_rgb,      // 外部视频（RGB565，黑边=0）
     output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
     output wire [11:0] raw_x,
@@ -159,17 +160,35 @@ module top_osd_demo #(
     wire [7:0]  trans_prog;
     wire        trans_swap;
 
-    auto_transition #(.HOLD_FRAMES(HOLD_FRAMES), .RUN_FRAMES(32)) u_auto (
+    // 换图脉冲要撑到下一个 frame_tick（一帧 90 万拍，1 拍脉冲必然错过）
+    reg [3:0] tg_win;
+    always @(posedge clk or posedge rst) begin
+        if (rst)                tg_win <= 4'd0;
+        else if (img_changed)   tg_win <= 4'd8;
+        else if (tg_win != 4'd0) tg_win <= tg_win - 4'd1;
+    end
+    wire trig_evt = (tg_win != 4'd0);
+
+    auto_transition #(
+        .HOLD_FRAMES(HOLD_FRAMES),
+        .RUN_FRAMES (USE_EXT ? 16 : 32),    // 淡入 16 帧 ≈ 0.5s
+        .ONESHOT    (USE_EXT ? 1 : 0)       // 播放真实图片时不做 A/B 周期交替
+    ) u_auto (
         .clk(clk), .rst(rst),
         .frame_tick(frame_tick),
-        .trig(1'b0),
+        .trig(USE_EXT ? trig_evt : 1'b0),
+        .pre_clr(USE_EXT ? img_changed : 1'b0),
         .effect(ef_trans),
         .prog(trans_prog),
         .swap(trans_swap)
     );
 
-    wire [23:0] src_a = trans_swap ? b_rgb : base_a;
-    wire [23:0] src_b = trans_swap ? base_a : b_rgb;
+    // USE_EXT=1（真实图片播放）：
+    //   B 源原来是 test_pattern_b 的彩条，A/B 交替会让每张图之后插入一段彩条，
+    //   所以这里把转场改成"黑 -> 新图"的单次淡入：换图时从黑淡入，既保留转场特效
+    //   又不会遮挡画面。非 USE_EXT（纯演示）保持原来的 A/B 交替。
+    wire [23:0] src_a = USE_EXT ? 24'h000000 : (trans_swap ? b_rgb : base_a);
+    wire [23:0] src_b = USE_EXT ? base_a     : (trans_swap ? base_a : b_rgb);
 
     wire [23:0] trans_rgb;
     transition #(.HACTIVE(HACTIVE)) u_trans (

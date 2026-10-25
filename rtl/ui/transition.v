@@ -111,13 +111,15 @@ endmodule
 //  auto_transition.v —— 自动转场节拍：每 HOLD 帧跑一次，A/B 角色交替
 // ============================================================================
 module auto_transition #(
-    parameter integer HOLD_FRAMES = 150,   // 每种画面停留帧数
-    parameter integer RUN_FRAMES  = 32     // 转场持续帧数
+    parameter integer HOLD_FRAMES = 150,   // 每种画面停留帧数（ONESHOT=0 时有效）
+    parameter integer RUN_FRAMES  = 32,    // 转场持续帧数
+    parameter integer ONESHOT     = 0      // 1 = 只在 trig 时跑一次，结束停在 b（不 swap）
 )(
     input  wire       clk,
     input  wire       rst,
     input  wire       frame_tick,          // 帧首单拍
-    input  wire       trig,                // 手动触发（按键）
+    input  wire       trig,                // 触发（换图/按键）
+    input  wire       pre_clr,             // 立刻把 prog 归零（换图瞬间先变黑）
     input  wire [1:0] effect,
     output reg  [7:0] prog,                // 0..255
     output reg        swap                 // 0: A->B   1: B->A
@@ -136,9 +138,12 @@ module auto_transition #(
             running  <= 1'b0;
             prog     <= 8'd0;
             swap     <= 1'b0;
+        end else if (pre_clr && ONESHOT[0] && !running) begin
+            prog <= 8'd0;                      // 不等 frame_tick，立刻黑
         end else if (frame_tick) begin
             if (!running) begin
-                if ((hold_cnt >= HOLD_FRAMES) || trig) begin
+                // ONESHOT：不要自动周期触发，只认 trig（换图时给一个）
+                if ((!ONESHOT[0] && (hold_cnt >= HOLD_FRAMES)) || trig) begin
                     running  <= 1'b1;
                     run_cnt  <= 16'd0;
                     hold_cnt <= 16'd0;
@@ -149,8 +154,12 @@ module auto_transition #(
             end else begin
                 if (run_cnt >= RUN_FRAMES - 1) begin
                     running <= 1'b0;
-                    prog    <= 8'd0;      // 与新 swap 后的 src_a 对应，画面不跳
-                    swap    <= ~swap;
+                    if (ONESHOT[0]) begin
+                        prog <= 8'hFF;    // 停在 b（= 新图），下次 trig 再从 0 起
+                    end else begin
+                        prog <= 8'd0;     // 与新 swap 后的 src_a 对应，画面不跳
+                        swap <= ~swap;
+                    end
                 end else begin
                     run_cnt <= run_cnt + 16'd1;
                     if (prog > 8'd255 - run_step[7:0])
