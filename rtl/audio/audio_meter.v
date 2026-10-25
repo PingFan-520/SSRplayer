@@ -46,7 +46,8 @@ module audio_meter #(
     // ------------------------------------------------------------------
     reg [7:0] bars [0:NBAR-1];
     reg [7:0] peak;
-    reg       warm = 1'b0;         // 0 = 还没填过（上电/换曲后第一次推列）
+    reg       warm = 1'b0;         // 0 = 还没填过（上电/换曲/静音后第一次推列）
+    reg [2:0] quiet;               // 连续静音帧数
 
     integer i;
 
@@ -59,7 +60,16 @@ module audio_meter #(
             if (level > peak)
                 peak <= level;
 
+            // 连续 6 帧没声音就重新进入"未预热"状态：
+            // 换曲/暂停后再出声时会重新把 128 列铺满，而不是从右边慢慢长
+            if (peak == 8'd0 && level == 8'd0) begin
+                if (quiet != 3'd7) quiet <= quiet + 3'd1;
+            end else begin
+                quiet <= 3'd0;
+            end
+
             if (frame_start) begin
+                if (quiet >= 3'd6) warm <= 1'b0;
                 if (!warm) begin
                     // 上电/换曲后的第一列：把 128 列全部填成当前值。
                     // 否则瀑布图要从右边慢慢长过来，128 列要 4 秒才铺满，

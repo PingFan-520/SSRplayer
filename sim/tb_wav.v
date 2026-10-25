@@ -174,11 +174,11 @@ module tb_wav;
         rst = 1'b0;
 
         // 等 FIFO 灌起来，抓 10ms 的 aud_valid 数量
-        repeat (200000) @(negedge clk);
+        wait (ncap >= 5000);
         nval = 0;
-        repeat (375000) @(negedge clk);
+        repeat (375000) @(negedge clk);   // 10ms
         rate = nval * 100;
-        if ((rate > 47900) && (rate < 48100))
+        if ((rate > 47800) && (rate < 48200))   // 10ms 窗内 479~481 个都正常
             $display("[ok] 采样率 %0d Hz（10ms 内 %0d 个）", rate, nval);
         else begin
             $display("[FAIL] 采样率 %0d Hz，应约 48000", rate);
