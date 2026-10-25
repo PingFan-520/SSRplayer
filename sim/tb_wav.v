@@ -201,6 +201,10 @@ module tb_wav;
             end
         end
         $display("[info] 比对 %0d 个采样，错 %0d 个", total_smp, bad);
+        for (i = 0; i < 6; i = i + 1)
+            $display("[cmp] i=%0d got=%04h exp=%04h exp[i-1]=%04h",
+                     i, cap[i], {mem[hdr_bytes+i*2+1], mem[hdr_bytes+i*2]},
+                     (i>0) ? {mem[hdr_bytes+(i-1)*2+1], mem[hdr_bytes+(i-1)*2]} : 16'h0);
 
         // 循环：WAV 长度 -> 扇区数
         sec_len = ((nbyte - hdr_bytes) / 2 + 255) / 256;

@@ -46,6 +46,7 @@ module audio_meter #(
     // ------------------------------------------------------------------
     reg [7:0] bars [0:NBAR-1];
     reg [7:0] peak;
+    reg       warm = 1'b0;         // 0 = 还没填过（上电/换曲后第一次推列）
 
     integer i;
 
@@ -59,10 +60,19 @@ module audio_meter #(
                 peak <= level;
 
             if (frame_start) begin
-                for (i = NBAR - 1; i > 0; i = i - 1)
-                    bars[i] <= bars[i-1];
-                bars[0] <= peak;
-                peak    <= 8'd0;
+                if (!warm) begin
+                    // 上电/换曲后的第一列：把 128 列全部填成当前值。
+                    // 否则瀑布图要从右边慢慢长过来，128 列要 4 秒才铺满，
+                    // 看起来就像"只有右侧有柱子"。
+                    for (i = 0; i < NBAR; i = i + 1)
+                        bars[i] <= peak;
+                    warm <= 1'b1;
+                end else begin
+                    for (i = NBAR - 1; i > 0; i = i - 1)
+                        bars[i] <= bars[i-1];
+                    bars[0] <= peak;
+                end
+                peak <= 8'd0;
             end
         end
     end

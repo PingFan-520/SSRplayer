@@ -79,7 +79,7 @@ module wav_player #(
     // FIFO 状态（声明要放在使用它的状态机之前）
     wire        fifo_full, fifo_empty, fifo_rvld;
     wire [15:0] fifo_dout;
-    wire [10:0] fifo_used;
+    wire [11:0] fifo_used;
 
     reg [2:0]  st;
     reg [31:0] sec_cnt;           // 本曲第几个扇区
@@ -139,7 +139,7 @@ module wav_player #(
                     s_req <= 1'b0;
                     // FIFO 快满就先别读：否则写不进去的采样会被直接丢掉
                     //（仿真里表现为"隔一段少几个采样"）。留 324 字余量 > 一整个扇区。
-                    if (!s_busy && (fifo_used < 11'd700)) begin
+                    if (!s_busy && (fifo_used < 12'd1200)) begin
                         if (sec_cnt + 32'd1 >= sl) begin
                             sec_cnt <= 32'd0;
                             s_sec   <= trk_base;              // 循环
@@ -171,7 +171,9 @@ module wav_player #(
     reg         fifo_rd;
     wire        fifo_wr = s_val & ~is_hdr & ~fifo_full;
 
-    afifo #(.DW(16), .AW(10)) u_fifo (
+    // 深度 1024 -> 2048（42ms）：换图时 SD 总线被图片占着，
+    // 这点余量能扛住更长的等待，避免 FIFO 见底导致的爆音
+    afifo #(.DW(16), .AW(11)) u_fifo (
         .clk_w(clk_sd), .clk_r(clk),
         .aclr(rst | trk_chg),
         .wr_en(fifo_wr), .wr_data(word_le), .wr_full(fifo_full),
@@ -224,23 +226,29 @@ module wav_player #(
 
     assign level = mag[15:7];                  // 0..255
 
-    // aud_valid 只在"确实取到新采样"时给一拍（FIFO 空时不给，
-    // 让 HDMI 核保持上一个采样，比喂 0 更不容易出爆音）。
-    // 与 aud_left 同拍：samp_v 比 samp 晚一拍，正好等 scaled 算完。
-    reg samp_v;
+    // aud_valid 必须**严格 48kHz 连续**：HDMI 核按 valid 采样，
+    // 一旦少给一拍，接收端音频 PLL 会抖 -> 尖锐爆音。
+    // FIFO 万一见底，就保持上一个采样（sample & hold），而不是留空拍。
+    reg tick_d, tick_d2, tick_d3;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             samp      <= 16'sd0;
-            samp_v    <= 1'b0;
+            tick_d    <= 1'b0;
+            tick_d2   <= 1'b0;
+            tick_d3   <= 1'b0;
             aud_valid <= 1'b0;
             aud_left  <= 24'd0;
             aud_right <= 24'd0;
         end else begin
-            samp_v <= fifo_rvld;
+            tick_d  <= tick;
+            tick_d2 <= tick_d;
+            tick_d3 <= tick_d2;
             if (fifo_rvld) samp <= $signed(fifo_dout);
 
-            aud_valid <= samp_v;
+            // aud_valid 比 tick 晚 3 拍：此时 samp 已经是本次弹出的采样，
+            // 与 aud_left 严格同拍（第 k 个 valid 就是文件第 k 个采样）
+            aud_valid <= tick_d3;
             aud_left  <= en ? scaled : 24'd0;
             aud_right <= en ? scaled : 24'd0;
         end

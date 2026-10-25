@@ -75,9 +75,11 @@ module sd_arb (
             end else if (active != 4'd0 && seen_busy) begin
                 active    <= 4'd0;               // 一次传输结束
                 seen_busy <= 1'b0;
-            end else if ((active != 4'd0) && !seen_busy && (active != 4'd15)) begin
-                // 发出去的命令没有回 busy（例如 SD 未初始化完）：超时自动放弃
-                active <= active + 4'd1;
+            end else if ((active != 4'd0) && !seen_busy) begin
+                // 发出去的命令没有回 busy：等 15 拍后**真正释放**总线。
+                // 之前这里写到 15 就停住，active 永远不为 0 -> idle 恒为 0 ->
+                // 音频和图片双双饿死（表现为音乐卡顿/爆音）。
+                active <= (active == 4'd15) ? 4'd0 : (active + 4'd1);
             end
         end
     end

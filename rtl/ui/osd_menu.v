@@ -114,12 +114,12 @@ module osd_menu #(
         end else begin
             // ---- KEY4(MENU)：开/关"设置"页 ----
             if (key_menu) begin
-                if (open && !page) begin
-                    open <= 1'b0;                 // 再按一次关掉
+                if (open) begin
+                    open <= 1'b0;                 // 任何页都：KEY4 = 关闭
                 end else begin
                     open <= 1'b1;
                     page <= 1'b0;
-                    item <= 3'd0;                 // 从音乐页也能一键切到设置
+                    item <= 3'd0;
                 end
             end
 
@@ -128,7 +128,7 @@ module osd_menu #(
                 if (!open) begin
                     open <= 1'b1;
                     page <= 1'b1;
-                    item <= 3'd0;
+                    item <= v_mus;                // 光标停在当前曲目上
                 end else if (page) begin
                     v_mus <= item;                // 0=OFF 1=GEN 2..=T1..
                     open  <= 1'b0;                // 选完自动关闭
