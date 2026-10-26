@@ -63,6 +63,7 @@ module tb_wav;
     wire [15:0] a_data;
 
     wire        s_start, s_busy, s_val;
+    wire        trk_bad_w;
     wire [31:0] s_sec;
     wire [15:0] s_data;
 

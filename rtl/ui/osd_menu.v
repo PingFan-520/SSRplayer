@@ -299,10 +299,10 @@ module osd_menu #(
                     2'd2: g_label = 6'd56;   // 模
                     default: g_label = 6'd57; // 式
                 endcase
-                3'd4: case (i)               // MUS（背景音乐开关；原来是没实现的"字幕"）
-                    2'd0: g_label = 6'd12;   // M
+                3'd4: case (i)               // AUT（自动轮播开关）
+                    2'd0: g_label = 6'd0;    // A
                     2'd1: g_label = 6'd20;   // U
-                    2'd2: g_label = 6'd18;   // S
+                    2'd2: g_label = 6'd19;   // T
                     default: g_label = 6'd37;
                 endcase
                 3'd5: case (i)
@@ -424,22 +424,7 @@ module osd_menu #(
                         default: g_val = (v == 4'd2) ? 6'd7 : 6'd37;
                     endcase
                 end
-                3'd4: begin                       // MUS：OFF / GEN / T1..T4
-                    case (i)
-                        3'd0: g_val = (v == 4'd0) ? 6'd14 :                 // O
-                                      (v == 4'd1) ? 6'd6  :                 // G
-                                      (v <= 4'd9) ? 6'd19 : 6'd37;          // T
-                        3'd1: g_val = (v == 4'd0) ? 6'd5  :                 // F
-                                      (v == 4'd1) ? 6'd4  :                 // E
-                                      (v == 4'd2) ? 6'd27 :                 // 1
-                                      (v == 4'd3) ? 6'd28 :                 // 2
-                                      (v == 4'd4) ? 6'd29 : 6'd30;          // 3 / 4
-                        3'd2: g_val = (v == 4'd0) ? 6'd5  :                 // F
-                                      (v == 4'd1) ? 6'd13 : 6'd37;          // N
-                        default: g_val = 6'd37;
-                    endcase
-                end
-                3'd6: begin                       // VU：ON / OFF
+                3'd4, 3'd6: begin                 // AUT / VU：ON / OFF
                     case (i)
                         3'd0: g_val = 6'd14;                       // O
                         3'd1: g_val = v[0] ? 6'd13 : 6'd5;         // N / F

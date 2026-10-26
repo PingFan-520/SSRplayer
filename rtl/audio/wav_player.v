@@ -44,7 +44,8 @@ module wav_player #(
     output reg         aud_valid,
     output reg  [23:0] aud_left,
     output reg  [23:0] aud_right,
-    output wire [7:0]  level         // 当前电平（给可视化）
+    output wire [7:0]  level,        // 当前电平（给可视化）
+    output wire        trk_bad       // 1 = 曲目起点的头不是 RIFF（卡镜像/参数不匹配）
 );
 
     // ==================================================================
@@ -86,6 +87,9 @@ module wav_player #(
     reg [31:0] sec_cnt;           // 本曲第几个扇区
     reg [8:0]  wcnt;              // 本扇区已收字数
     reg [15:0] len_lo, len_hi;    // WAV 头里的 data size
+    reg [15:0] hdr0, hdr1;        // 曲目首扇区的头两个字（应为 "RI" "FF"）
+    reg        hdr_wav;           // 1 = 该曲目起点确实是 RIFF/WAVE
+    reg        hdr_chk;           // 已经读到第 2 个扇区，校验结果有效
 
     wire [7:0]  hdr_i   = wcnt[7:0];
     wire        is_hdr  = (sec_cnt == 32'd0) && (hdr_i < HDR_WORDS[7:0]);
@@ -108,7 +112,17 @@ module wav_player #(
             len_lo  <= 16'd0;
             len_hi  <= 16'd0;
             bsync   <= 1'b0;
+            hdr0    <= 16'd0;
+            hdr1    <= 16'd0;
+            hdr_wav <= 1'b0;
+            hdr_chk <= 1'b0;
         end else begin
+            // 曲目起点必须是 RIFF/WAVE，否则说明 SD 卡上的镜像和 RTL 的参数对不上
+            // （音乐区扇区号变了、卡没重写）。这时**宁可不放**，也不要拿图片像素
+            // 当 PCM 播出去 —— 那正是一段段的"尖锐爆音"。
+            hdr_wav <= (hdr0 == 16'h4952) && (hdr1 == 16'h4646);
+            if (sec_cnt >= 32'd2) hdr_chk <= 1'b1;
+
             case (st)
                 S_IDLE: begin
                     s_req <= 1'b0;
@@ -132,6 +146,9 @@ module wav_player #(
                         // 抓长度：第 20/21 个字（字节 40..43 = data size）
                         if ((sec_cnt == 32'd0) && (hdr_i == 8'd20)) len_lo <= word_le;
                         if ((sec_cnt == 32'd0) && (hdr_i == 8'd21)) len_hi <= word_le;
+                        // 抓曲目开头的魔术字："RIFF" -> 字 0 = 0x4952、字 1 = 0x4646
+                        if ((sec_cnt == 32'd0) && (hdr_i == 8'd0)) hdr0 <= word_le;
+                        if ((sec_cnt == 32'd0) && (hdr_i == 8'd1)) hdr1 <= word_le;
 
                         if (wcnt == 9'd255) begin
                             wcnt  <= 9'd0;
@@ -170,6 +187,9 @@ module wav_player #(
                 s_req   <= 1'b0;
                 sec_cnt <= 32'd0;
                 wcnt    <= 9'd0;
+                hdr0    <= 16'd0;          // 换曲后重新校验一次
+                hdr1    <= 16'd0;
+                hdr_chk <= 1'b0;
             end
         end
     end
@@ -181,7 +201,7 @@ module wav_player #(
     // ★ 写 FIFO 必须同时满足 bsync：只有"本扇区 busy 起来之后"收到的字才算数据。
     //   少了 bsync，上一扇区的尾巴/CRC、或仲裁器切主时残留的字都会被写进 FIFO，
     //   整个采样流从此错位半个采样 —— 听感就是"尖锐的沙沙/爆音"。
-    wire        fifo_wr = s_val & bsync & ~is_hdr & ~fifo_full;
+    wire        fifo_wr = s_val & bsync & hdr_wav & ~is_hdr & ~fifo_full;
 
     // 深度固定 1024（21ms）。**不要再加大**：2048 要多占 2 块 M9K，
     // 这块板的 BRAM/布线余量很紧，实测会花屏（Incremental route 挤爆）。
@@ -237,6 +257,7 @@ module wav_player #(
     wire        [15:0] mag    = g16[15] ? (~g16 + 16'd1) : g16;
 
     assign level = mag[15:7];                  // 0..255
+    assign trk_bad = hdr_chk & ~hdr_wav;        // 数码管上用 F 提示"卡不对"
 
     // aud_valid 必须**严格 48kHz 连续**：HDMI 核按 valid 采样，
     // 一旦少给一拍，接收端音频 PLL 会抖 -> 尖锐爆音。
