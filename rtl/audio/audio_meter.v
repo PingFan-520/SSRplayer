@@ -41,48 +41,59 @@ module audio_meter #(
     output reg  [3:0]  alpha
 );
 
-    // ------------------------------------------------------------------
-    // 柱子历史：每帧推一列，取这一帧内的峰值
-    // ------------------------------------------------------------------
-    reg [7:0] bars [0:NBAR-1];
-    reg [7:0] peak;
-    reg       warm = 1'b0;         // 0 = 还没填过（上电/换曲/静音后第一次推列）
-    reg [5:0] quiet;               // 连续静音帧数（到 45 帧 = 1.5s 认为换曲/停播）
+    localparam integer XW = NBAR * BARW;
+    localparam integer BW = $clog2(NBAR);     // 128 -> 7（BARW=8 时正好是 dx[9:3]）
 
-    integer i;
+    // ------------------------------------------------------------------
+    // 柱子历史：**环形缓冲 + 写指针**，不做整体移位
+    //
+    //  ★ 上一版是 128 个寄存器每帧整列移位（`bars[i] <= bars[i-1]`）。
+    //    上板表现是"只有右半在动，左半一直停在峰值"——
+    //    典型的"综合把这种整列移位映射成了 SRL/移位链，而并行读只认到一部分抽头"。
+    //    改成写指针后，每帧只写 1 个单元、读地址做加法，就不再依赖工具怎么理解移位。
+    //
+    //    最新的一列写在 mem[wp]，下一帧 wp+1；
+    //    第 c 列（0=最左、NBAR-1=最右）读 mem[wp + c]（模 NBAR）：
+    //      c = NBAR-1 时地址是 wp-1 -> 正好是最新那一列（放在最右边）。
+    // ------------------------------------------------------------------
+    reg [7:0] hist [0:NBAR-1];
+    reg [7:0] peak;                // 本帧内的峰值
+    reg [BW-1:0] wp;               // 写指针
+    reg [5:0] quiet;               // 连续静音拍数（饱和 45）
+    reg       filling;             // 正在把整幅填成当前峰值（出声瞬间/复位后）
+    reg [BW-1:0] fill_i;
+
+    // 静音很久之后又来声音 -> 立刻把整幅铺满，免得"从右边慢慢长"看起来像坏了
+    wire onset = (level != 8'd0) && (quiet >= 6'd45);
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            peak <= 8'd0;
-            for (i = 0; i < NBAR; i = i + 1)
-                bars[i] <= 8'd0;
+            peak    <= 8'd0;
+            wp      <= {BW{1'b0}};
+            quiet   <= 6'd45;      // 复位后第一次出声就铺满
+            filling <= 1'b0;
+            fill_i  <= {BW{1'b0}};
         end else begin
             if (level > peak)
                 peak <= level;
 
-            // 连续 6 帧没声音就重新进入"未预热"状态：
-            // 换曲/暂停后再出声时会重新把 128 列铺满，而不是从右边慢慢长
-            if (peak == 8'd0 && level == 8'd0) begin
+            if (level == 8'd0) begin
                 if (quiet != 6'd45) quiet <= quiet + 6'd1;
             end else begin
                 quiet <= 6'd0;
             end
 
-            if (frame_start) begin
-                if (quiet >= 6'd45) warm <= 1'b0;
-                if (!warm) begin
-                    // 上电/换曲后的第一列：把 128 列全部填成当前值。
-                    // 否则瀑布图要从右边慢慢长过来，128 列要 4 秒才铺满，
-                    // 看起来就像"只有右侧有柱子"。
-                    for (i = 0; i < NBAR; i = i + 1)
-                        bars[i] <= peak;
-                    warm <= 1'b1;
-                end else begin
-                    for (i = NBAR - 1; i > 0; i = i - 1)
-                        bars[i] <= bars[i-1];
-                    bars[0] <= peak;
-                end
-                peak <= 8'd0;
+            if (onset) begin
+                filling <= 1'b1;
+                fill_i  <= {BW{1'b0}};
+            end else if (filling) begin
+                hist[fill_i] <= (peak > level) ? peak : level;
+                if (fill_i == (NBAR-1)) filling <= 1'b0;
+                else                    fill_i  <= fill_i + 1'b1;
+            end else if (frame_start) begin
+                hist[wp] <= peak;          // 每帧只写一个单元
+                wp       <= wp + 1'b1;
+                peak     <= 8'd0;
             end
         end
     end
@@ -90,8 +101,6 @@ module audio_meter #(
     // ------------------------------------------------------------------
     // 逐像素判断
     // ------------------------------------------------------------------
-    localparam integer XW = NBAR * BARW;
-    localparam integer BW = $clog2(NBAR);     // 128 -> 7（BARW=8 时正好是 dx[9:3]）
 
     wire in_rect = enable &&
                    (x >= X0[11:0]) && (x < (X0 + XW)) &&
@@ -113,7 +122,9 @@ module audio_meter #(
     wire [BW-1:0] bi   = (cidx > (NBAR-1)) ? (NBAR-1) : ((NBAR-1) - cidx);
     wire          ingap = (dx[2:0] >= 3'd5);
 
-    wire [7:0]  lv = bars[bi];
+    // 读地址 = wp + cidx（模 NBAR）：最右列(cidx=127) 读到 wp-1 = 最新
+    wire [BW-1:0] raddr = wp + cidx;
+    wire [7:0]  lv = hist[raddr];
     // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）
     wire [8:0]  hh  = {1'b0, lv[7:1]} + {2'b00, lv[7:3]};
     wire [8:0]  hcl = (hh > MAXH[8:0]) ? MAXH[8:0] : hh;

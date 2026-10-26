@@ -100,7 +100,7 @@ module tb_wav;
         .s_req(a_req), .s_sec(a_sec),
         .s_busy(a_busy), .s_val(a_val), .s_data(a_data),
         .aud_valid(aud_valid), .aud_left(aud_l), .aud_right(aud_r),
-        .level(level)
+        .level(level), .trk_bad(trk_bad_w)
     );
 
     // 假 SD 行为
@@ -135,6 +135,7 @@ module tb_wav;
     integer    nval = 0;
     integer    lvl_lo = 255, lvl_hi = 0;
     integer    lvl_bad = 0;
+    integer    trk_bad_v = 0;
 
     always @(posedge clk) begin
         if (aud_valid) begin
@@ -233,7 +234,9 @@ module tb_wav;
             end
         end
 
-        if (bad == 0 && sec_bad == 0 && lvl_bad == 0)
+        $display("[info] trk_bad=%b（好卡应为 0）", trk_bad_w);
+        trk_bad_v = (trk_bad_w !== 1'b0) ? 1 : 0;
+        if (bad == 0 && sec_bad == 0 && lvl_bad == 0 && trk_bad_v == 0)
             $display("[PASS] wav_player 全部用例通过");
         else
             $display("[FAIL] wav_player 有错误");

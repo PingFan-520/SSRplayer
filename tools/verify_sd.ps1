@@ -114,9 +114,40 @@ try {
               $i, ($s.Pos / $SEC), $tag, $s.W, $s.H, $s.Bf, $diff)
     }
 
+    # ---------- 3. music slots (RIFF/WAVE), sector aligned ----------
+    #  RTL 里 MUS_BASE=18272 / MUS_STRIDE=49328（3 图之后），
+    #  wav_player 会校验曲目首扇区的头两个字是否为 "RI"/"FF"。
+    #  卡上这里若是图片像素，就会静音并把数码管最高位点亮成 F。
+    $mus = @()
+    $pos = 0
+    while ($true) {
+        $p = [Array]::IndexOf($img, [byte]0x52, $pos)      # 'R'，native 扫描
+        if ($p -lt 0 -or $p -ge ($img.Length - 44)) { break }
+        $pos = $p + 1
+        if (($p % $SEC) -ne 0) { continue }                # 必须在扇区边界
+        if ($img[$p+1] -ne 0x49 -or $img[$p+2] -ne 0x46 -or $img[$p+3] -ne 0x46) { continue }
+        if ([Text.Encoding]::ASCII.GetString($img, $p + 8, 4) -ne 'WAVE') { continue }
+        $dsz = [BitConverter]::ToUInt32($img, $p + 40)
+        $mus += [pscustomobject]@{ Pos = $p; Bytes = $dsz }
+    }
+    Log ("music slots in image: {0}" -f $mus.Count)
+    $musBad = 0
+    for ($i = 0; $i -lt $mus.Count; $i++) {
+        $m = $mus[$i]
+        $tag = [Text.Encoding]::ASCII.GetString($buf, $m.Pos, 4)
+        $ok  = ($tag -eq 'RIFF')
+        if (-not $ok) { $musBad++ }
+        Log ("  [M{0}] @sector {1,-6} card='{2}'  {3:N1} s  {4}" -f `
+              ($i + 1), ($m.Pos / $SEC), $tag, ($m.Bytes / 2.0 / 48000),
+              $(if ($ok) { 'OK' } else { 'BAD - RTL 会静音并显示 F' }))
+    }
+    if ($mus.Count -eq 0) {
+        Log "  (image has no RIFF slot -- run tools/make_sd_image.py first)"
+    }
+
     # ---------- verdict ----------
-    if ($hashOk -and $slotBad -eq 0) {
-        Log "RESULT: OK - card identical to image, all $($slots.Count) slots valid"
+    if ($hashOk -and $slotBad -eq 0 -and $musBad -eq 0) {
+        Log "RESULT: OK - card identical to image; $($slots.Count) images + $($mus.Count) music slots valid"
     } elseif ($slotBad -ne 0) {
         Log "RESULT: FAIL - $slotBad slot(s) bad on card"
     } else {

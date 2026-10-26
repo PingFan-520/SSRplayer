@@ -122,10 +122,14 @@ module tb_meter_full;
             errs = errs + 1;
         end
 
-        // 灌一组递增高度：bars[i] = i*2（左=老=矮，右=新=高）
+        // 灌一组递增"年龄"的高度：第 c 列（0=最左=最老、127=最右=最新）
+        // 读地址 = wp + c，所以这里直接按 hist 的槽位写：
+        //   让最右列（c=127）高度最高、最左列最低 -> 检查左右映射与铺满
         for (k = 0; k < 128; k = k + 1)
-            dut.u_meter.bars[k] = k[7:0] * 2;
-        dut.u_meter.warm = 1'b1;
+            dut.u_meter.hist[(k) % 128] = k[7:0] * 2;   // hist[i] = i*2
+        dut.u_meter.wp = 7'd0;      // raddr = 0 + c -> c=0 读到 hist[0]=0（最矮，最左）
+        dut.u_meter.filling = 1'b0;
+        dut.u_meter.peak = 8'd0;
 
         wait_frame;
         on_min = 99999; on_max = 0;       // 先清零，再让完整一帧扫过去
