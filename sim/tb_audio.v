@@ -226,7 +226,7 @@ module tb_audio;
         begin : dump_meter
             integer fd, bx, by, cc, hh2;
             for (i = 0; i < 32; i = i + 1) begin
-                hh2 = 250 - (i % 8) * 26;
+                hh2 = 90 + ((i * 53) % 150);      // 伪随机，像真实音乐
                 bars_flat[i*8 +: 8] = hh2[7:0];
             end
             fd = $fopen("meter_out.ppm", "wb");
