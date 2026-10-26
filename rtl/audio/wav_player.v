@@ -45,7 +45,8 @@ module wav_player #(
     output reg  [23:0] aud_left,
     output reg  [23:0] aud_right,
     output wire [7:0]  level,        // 当前电平（给可视化）
-    output wire        trk_bad       // 1 = 曲目起点的头不是 RIFF（卡镜像/参数不匹配）
+    output wire        trk_bad,      // 1 = 曲目起点的头不是 RIFF（卡镜像/参数不匹配）
+    output wire [15:0] dbg_hdr       // 曲目首扇区第一个 16bit 字（调试：0x4952='RI'）
 );
 
     // ==================================================================
@@ -258,6 +259,10 @@ module wav_player #(
 
     assign level = mag[15:7];                  // 0..255
     assign trk_bad = hdr_chk & ~hdr_wav;        // 数码管上用 F 提示"卡不对"
+    assign dbg_hdr = hdr0;                      // 数码管上直接看这个字：
+                                                //   4952 = "RI"（对）
+                                                //   4D42 = "BM"（该扇区是 BMP -> 卡没重写）
+                                                //   0000 = 根本没读到数据
 
     // aud_valid 必须**严格 48kHz 连续**：HDMI 核按 valid 采样，
     // 一旦少给一拍，接收端音频 PLL 会抖 -> 尖锐爆音。

@@ -832,6 +832,7 @@ module top_board #(
     //   [3:0] {ld_st[2:0], sd_ready}：
     //         1=WAIT 3=CLEAR 5=ARM 7=LOAD 9=SHOW（sd_ready=1 时都是奇数）
     wire        trk_bad;           // 曲目头不是 RIFF（SD 卡镜像/参数不匹配）
+    wire [15:0] wav_hdr;           // 曲目首扇区第一个字（调试显示）
     // 最高位段显示 F = 音乐区头校验失败（卡没按当前镜像重写）
     wire [7:0]  dbg_ext = { trk_bad ? 4'hF : drop_cnt, ld_st, sd_ready};
 
@@ -866,7 +867,7 @@ module top_board #(
         .fade_lvl(fade_lvl),
         .ext_rgb(fb_rgb),
         .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
-        .dbg_ext(dbg_ext),
+        .dbg_ext(dbg_ext), .dbg_hdr(wav_hdr),
         .aud_lvl(aud_lvl),
         .aud_meter_en(1'b1)          // 音频电平表常开（想关掉改 0）
     );
@@ -947,7 +948,7 @@ module top_board #(
         .aud_left (wav_l),
         .aud_right(wav_r),
         .level    (wav_lvl),
-        .trk_bad  (trk_bad)
+        .trk_bad  (trk_bad), .dbg_hdr(wav_hdr)
     );
 
     // 音源选择：有 WAV 曲目就放 WAV，否则放内置音阶

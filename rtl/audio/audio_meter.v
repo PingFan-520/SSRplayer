@@ -66,6 +66,15 @@ module audio_meter #(
     // 静音很久之后又来声音 -> 立刻把整幅铺满，免得"从右边慢慢长"看起来像坏了
     wire onset = (level != 8'd0) && (quiet >= 6'd45);
 
+    // 落柱：某一帧正好没有声音时不要直接把柱子清成 0（那样看着像"突然消失"），
+    // 而是在上一列的基础上每帧掉 8 格（30fps 下约 1 秒落到地）。
+    // 这也是参考工程 FFT_decay_mapper 的"衰减保持"观感。
+    localparam [7:0] DECAY = 8'd8;
+    wire [BW-1:0] paddr   = wp - 1'b1;
+    wire [7:0]    prev_lv = hist[paddr];
+    wire [7:0]    next_lv = (peak != 8'd0) ? peak :
+                            ((prev_lv > DECAY) ? (prev_lv - DECAY) : 8'd0);
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             peak    <= 8'd0;
@@ -91,7 +100,7 @@ module audio_meter #(
                 if (fill_i == (NBAR-1)) filling <= 1'b0;
                 else                    fill_i  <= fill_i + 1'b1;
             end else if (frame_start) begin
-                hist[wp] <= peak;          // 每帧只写一个单元
+                hist[wp] <= next_lv;       // 每帧只写一个单元（无声时按 DECAY 下落）
                 wp       <= wp + 1'b1;
                 peak     <= 8'd0;
             end

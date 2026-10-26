@@ -64,6 +64,7 @@ module top_osd_demo #(
     output wire [11:0] raw_x,
     output wire [11:0] raw_y,        // 帧内行号 0..VTOTAL-1
     input  wire [7:0]  dbg_ext,      // 调试字（SD/轮播状态），显示在数码管
+    input  wire [15:0] dbg_hdr,      // 曲目首扇区第一个 16bit 字（trk_bad 时显示）
     input  wire [7:0]  aud_lvl,      // 音频包络（含音量），给电平表
     input  wire        aud_meter_en  // 1 = 显示音频电平表
 );
@@ -358,7 +359,12 @@ module top_osd_demo #(
         .rst_n   (rst_n),
         // seg7 的 dsel=0 对应最左边一位，而它是 value[3:0]，
         // 直接接 dbg_ext 会显示成左右颠倒（05 显示成 50），这里交换高低半字节
-        .value   ({8'd0, 8'd0, dbg_ext[3:0], dbg_ext[7:4]}),
+        // trk_bad（dbg_ext[7:4]==F）时，数码管直接显示曲目首扇区的第一个字：
+        //   4952 = "RI" 正常；4D42 = "BM" 说明这个扇区是 BMP（卡没按当前镜像重写）；
+        //   0000 = 没读到数据。显示成 4 位数 + 尾随 FF 表示"异常"。
+        .value   ((dbg_ext[7:4] == 4'hF)
+                  ? {8'hFF, dbg_hdr[3:0], dbg_hdr[7:4], dbg_hdr[11:8], dbg_hdr[15:12]}
+                  : {16'd0, dbg_ext[3:0], dbg_ext[7:4]}),
         .dp_mask ({menu_open, 5'b00000}),
         .seg_sel (seg_sel),
         .seg_data(seg_data)

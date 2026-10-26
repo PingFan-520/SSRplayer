@@ -269,8 +269,10 @@ module osd_menu #(
                     endcase
                     default: case (i)
                         2'd0: g_label = 6'd19;   // T
+                        // 字形 27='1' 28='2' 29='3' 30='4'；行号 it=2 对应 T1，
+                        // 所以基址是 25（写成 26 会整体偏一位，列表显示成 T2/T3）
                         2'd1: g_label = (it >= 3'd2 && it < (MUS_NUM[2:0] + 3'd2))
-                                       ? (6'd26 + it) : 6'd37;
+                                       ? (6'd25 + it) : 6'd37;
                         default: g_label = 6'd37;
                     endcase
                 endcase
