@@ -239,7 +239,20 @@ module frame_buffer #(
     wire [11:0] dy12       = wd_y - Y0W;
     wire [8:0]  dy         = dy12[8:0];
     wire [10:0] dxw        = wd_xw - X0W;
-    wire [17:0] row_base   = dy * IW9;
+    // ★ 这里原来是 `dy * IW9`，综合出来是一个乘法器，串在
+    //   "写 FIFO 输出 -> SDRAM 写地址"这条 125MHz 组合路径上。
+    //   TD 时序报告（phy_1）里它就是全设计最差路径：SWNS = -4.12ns，
+    //   125MHz 域 135 个端点不满足 —— 上板表现就是随机花屏/局部错位。
+    //   IW = 320 = 256 + 64，用移位加法完全等价，只剩一个 18 位加法器。
+    //   （其它宽度自动退回乘法，功能仍然正确）
+    wire [17:0] row_base;
+    generate
+        if (IW == 320) begin : g_row_sh
+            assign row_base = ({9'd0, dy} << 8) + ({9'd0, dy} << 6);
+        end else begin : g_row_mul
+            assign row_base = dy * IW9;
+        end
+    endgenerate
     wire [20:0] word_raw   = {3'd0, row_base} + {10'd0, dxw};
     wire [20:0] wr_bank_off = wr_bank ? IT21 : 21'd0;
     wire [20:0] word_addr   = {word_raw[18:0], 2'b00} +
@@ -419,8 +432,19 @@ module frame_buffer #(
     // fcnt 现在是准的（单拍计数），阈值留 16 字余量给 burst 在途数据。
     // 额外加 ~bsend：写 burst 在飞的 4 拍里不能起读，
     // 否则窗口边界处会出现"读写同时"（APUG011 禁止）
+    // ★ rf_used 是"跨时钟域同步 + 格雷转二进制"算出来的，链很长。
+    //   它原来直接进 rstart 的水位比较，再经 rd_go -> SDRAM 控制器的命令译码，
+    //   TD 时序报告里这是 125MHz 域最差路径（SWNS -2.2ns，144 个端点不满足）。
+    //   占用量的变化是"每几个周期才 1 个字"，打一拍完全不影响水位判断
+    //   （阈值 2032 / 深度 2048 本来就留了 16 字余量），却能把这条路径砍掉一半。
+    reg [11:0] rf_used_r;
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem) rf_used_r <= 12'd0;
+        else         rf_used_r <= rf_used;
+    end
+
     wire       rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                        (rf_used < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0) &
+                        (rf_used_r < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0) &
                         ~bsend & (wq == 6'd63);
 
     always @(posedge clk_mem or posedge rst_mem) begin

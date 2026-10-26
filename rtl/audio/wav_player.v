@@ -79,9 +79,10 @@ module wav_player #(
     // FIFO 状态（声明要放在使用它的状态机之前）
     wire        fifo_full, fifo_empty, fifo_rvld;
     wire [15:0] fifo_dout;
-    wire [11:0] fifo_used;
+    wire [10:0] fifo_used;
 
     reg [2:0]  st;
+    reg        bsync;             // 已经看到本扇区的 busy 上升沿
     reg [31:0] sec_cnt;           // 本曲第几个扇区
     reg [8:0]  wcnt;              // 本扇区已收字数
     reg [15:0] len_lo, len_hi;    // WAV 头里的 data size
@@ -106,11 +107,13 @@ module wav_player #(
             wcnt    <= 9'd0;
             len_lo  <= 16'd0;
             len_hi  <= 16'd0;
+            bsync   <= 1'b0;
         end else begin
             case (st)
                 S_IDLE: begin
                     s_req <= 1'b0;
                     wcnt  <= 9'd0;
+                    bsync <= 1'b0;
                     if (en) begin
                         sec_cnt <= 32'd0;
                         s_sec   <= trk_base;
@@ -120,7 +123,12 @@ module wav_player #(
                 end
 
                 S_REQ: begin
-                    if (s_val) begin
+                    // 先等 busy 起来 = 这一扇区真正开始，之后收到的字才算本扇区的数据。
+                    // 没有这一步，上一扇区尾巴/CRC 的字会被当成本扇区的开头，
+                    // 整条流就永久错位（听感是持续的"尖锐沙沙"）。
+                    if (s_busy) bsync <= 1'b1;
+
+                    if (bsync && s_val) begin
                         // 抓长度：第 20/21 个字（字节 40..43 = data size）
                         if ((sec_cnt == 32'd0) && (hdr_i == 8'd20)) len_lo <= word_le;
                         if ((sec_cnt == 32'd0) && (hdr_i == 8'd21)) len_hi <= word_le;
@@ -128,6 +136,7 @@ module wav_player #(
                         if (wcnt == 9'd255) begin
                             wcnt  <= 9'd0;
                             s_req <= 1'b0;
+                            bsync <= 1'b0;
                             st    <= S_NEXT;
                         end else begin
                             wcnt <= wcnt + 9'd1;
@@ -139,7 +148,7 @@ module wav_player #(
                     s_req <= 1'b0;
                     // FIFO 快满就先别读：否则写不进去的采样会被直接丢掉
                     //（仿真里表现为"隔一段少几个采样"）。留 324 字余量 > 一整个扇区。
-                    if (!s_busy && (fifo_used < 12'd1200)) begin
+                    if (!s_busy && (fifo_used < 11'd700)) begin
                         if (sec_cnt + 32'd1 >= sl) begin
                             sec_cnt <= 32'd0;
                             s_sec   <= trk_base;              // 循环
@@ -169,11 +178,14 @@ module wav_player #(
     // 3) 异步 FIFO：SD 域写、像素域读
     // ==================================================================
     reg         fifo_rd;
-    wire        fifo_wr = s_val & ~is_hdr & ~fifo_full;
+    // ★ 写 FIFO 必须同时满足 bsync：只有"本扇区 busy 起来之后"收到的字才算数据。
+    //   少了 bsync，上一扇区的尾巴/CRC、或仲裁器切主时残留的字都会被写进 FIFO，
+    //   整个采样流从此错位半个采样 —— 听感就是"尖锐的沙沙/爆音"。
+    wire        fifo_wr = s_val & bsync & ~is_hdr & ~fifo_full;
 
-    // 深度 1024 -> 2048（42ms）：换图时 SD 总线被图片占着，
-    // 这点余量能扛住更长的等待，避免 FIFO 见底导致的爆音
-    afifo #(.DW(16), .AW(11)) u_fifo (
+    // 深度固定 1024（21ms）。**不要再加大**：2048 要多占 2 块 M9K，
+    // 这块板的 BRAM/布线余量很紧，实测会花屏（Incremental route 挤爆）。
+    afifo #(.DW(16), .AW(10)) u_fifo (
         .clk_w(clk_sd), .clk_r(clk),
         .aclr(rst | trk_chg),
         .wr_en(fifo_wr), .wr_data(word_le), .wr_full(fifo_full),

@@ -1,19 +1,26 @@
 // ============================================================================
 //  sd_arb.v —— SD 读总线仲裁（音频优先，图片等待）
 //
-//  背景：sd_ctrl_top 只有一个读口（rd_start_en / rd_sec_addr / rd_busy / rd_val_*）。
-//        既要读图片（换图时一次 0.9MB），又要读音乐（连续 96KB/s），必须仲裁。
+//  背景：sd_ctrl_top 只有一个读口（rd_start_en / rd_sec_addr / rd_busy / rd_val_*），
+//        既要读图片（换图时一次 ~1MB），又要读音乐（连续 96KB/s），必须仲裁。
 //
-//  策略：**按扇区粒度**、音频优先。
-//    音频每 5.3ms 才要一个扇区，让它在前面插队，图片那次读只会被拉长 ~6%，
-//    但音频永远不会断（FIFO 里还有 20ms 余量）。
+//  策略：按**扇区**粒度、音频优先。音频每 5.33ms 要一个扇区，让它插队，
+//        图片那次读只会被拉长 ~6%，但音频永远不会断。
 //
-//  关键细节（踩过这个坑的人不少）：
-//    没拿到总线的那个使用者，必须看到"被门控过"的 busy/val/data。
-//    否则它一看到别人把 busy 拉高，就以为自己的命令在跑，会把别人的数据收走。
+//  ★ 核心：**由仲裁器自己数满 256 个字**（一个扇区 = 512B = 256 x 16bit）。
+//    拿到总线的使用者一次只会收到 256 个字，不多不少。
 //
-//  时序：owner 在 s_start 那一拍之后才更新，所以地址用**组合**选择
-//        （start_aud ? a_sec : b_sec），不能用 owner 选，否则第一拍地址是旧的。
+//    为什么必须这样：上一版靠"盯 busy 的上升/下降沿"判断一次传输的开始和结束，
+//    再把 s_val 直接门控给 owner。实板上 rd_val_en 的拍数/相位和仿真模型并不
+//    完全一样（CRC 尾字、切主瞬间的残留拍），一旦多给或少给一个字，
+//    接收侧的字节流就整体错位半个采样：
+//      · 图片侧 -> BMP 解码错位 -> 花屏
+//      · 音频侧 -> 采样错位     -> 尖锐的沙沙/爆音
+//    现在帧长度由仲裁器保证，接收侧不会再收到"半截扇区"。
+//
+//    实现上**不依赖 busy 的边沿**：授权后进入 active，此后 s_val 来一个放行一个，
+//    数到 256 就等 busy 落下再释放（busy 早落下也不影响）。
+//    另有两个看门狗，任何异常都不会把总线锁死（上一版 active 卡在 15 的教训）。
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -27,7 +34,7 @@ module sd_arb (
     output wire        a_busy,
     output wire        a_val,
     output wire [15:0] a_data,
-    output wire        a_gnt,      // 本次传输归 A（供调试/观测）
+    output wire        a_gnt,
 
     // ---- 使用者 B：图片 ----
     input  wire        b_req,
@@ -47,51 +54,66 @@ module sd_arb (
     input  wire        sd_init_done   // 初始化完成前不允许发命令
 );
 
-    // 一次传输进行中的标记：从发出 s_start 起，到 busy 落下为止
-    reg [3:0]  active;
-    reg        seen_busy;
-    reg        owner;              // 1 = 这次传输属于音频
+    reg        active;          // 一次传输进行中
+    reg        owner;           // 1 = 本次传输属于音频
+    reg  [8:0] wc;              // 已放行的字数
+    reg        wend;            // 256 字已收满，只等 busy 落下
+    reg [13:0] stall;           // 等不到数据的看门狗
 
-    wire idle = (active == 4'd0) & ~s_busy;
+    wire idle  = ~active & ~s_busy;
+    wire gnt_a = idle & sd_init_done &  a_req;
+    wire gnt_b = idle & sd_init_done & ~a_req & b_req;
+    wire grant = gnt_a | gnt_b;
 
-    wire start_aud = idle & sd_init_done &  a_req;
-    wire start_bmp = idle & sd_init_done & ~a_req & b_req;
+    // 地址必须组合选择：owner 下一拍才更新，用 owner 选会送错地址
+    assign s_start = grant;
+    assign s_sec   = gnt_a ? a_sec : b_sec;
 
-    assign s_start = start_aud | start_bmp;
-    assign s_sec   = start_aud ? a_sec : b_sec;
+    // 只放行 active 期间的 s_val，并且只在放行的那一拍算有效
+    wire fwd = active & s_val;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            active    <= 4'd0;
-            seen_busy <= 1'b0;
-            owner     <= 1'b1;
+            active <= 1'b0;
+            owner  <= 1'b1;
+            wc     <= 9'd0;
+            wend   <= 1'b0;
+            stall  <= 14'd0;
+        end else if (!active) begin
+            wc    <= 9'd0;
+            wend  <= 1'b0;
+            stall <= 14'd0;
+            if (grant) begin
+                active <= 1'b1;
+                owner  <= gnt_a;
+            end
         end else begin
-            if (s_start) begin
-                active    <= 4'd1;
-                seen_busy <= 1'b0;
-                owner     <= start_aud;          // 这一拍之后按它来门控
-            end else if (s_busy) begin
-                seen_busy <= 1'b1;
-            end else if (active != 4'd0 && seen_busy) begin
-                active    <= 4'd0;               // 一次传输结束
-                seen_busy <= 1'b0;
-            end else if ((active != 4'd0) && !seen_busy) begin
-                // 发出去的命令没有回 busy：等 15 拍后**真正释放**总线。
-                // 之前这里写到 15 就停住，active 永远不为 0 -> idle 恒为 0 ->
-                // 音频和图片双双饿死（表现为音乐卡顿/爆音）。
-                active <= (active == 4'd15) ? 4'd0 : (active + 4'd1);
+            if (fwd) begin
+                stall <= 14'd0;
+                if (wc == 9'd255) wend <= 1'b1;   // 第 256 个字已放行
+                else              wc   <= wc + 9'd1;
+            end else if (!wend) begin
+                // 等数据：超过 16K 拍还没有 -> 放弃（坏卡/未初始化）
+                if (stall == 14'h3FFF) begin
+                    active <= 1'b0;
+                    stall  <= 14'd0;
+                end else begin
+                    stall <= stall + 14'd1;
+                end
+            end else if (!s_busy) begin
+                active <= 1'b0;                   // 收满且 busy 落下 -> 释放
             end
         end
     end
 
     // 门控：谁没拿到总线，谁就看不到 busy/val/data
-    assign a_busy = s_busy &  owner;
-    assign a_val  = s_val  &  owner;
+    assign a_busy = active &  owner;
+    assign a_val  = fwd    &  owner;
     assign a_data = s_data;
     assign a_gnt  = owner;
 
-    assign b_busy = s_busy & ~owner;
-    assign b_val  = s_val  & ~owner;
+    assign b_busy = active & ~owner;
+    assign b_val  = fwd    & ~owner;
     assign b_data = s_data;
     assign b_gnt  = ~owner;
 

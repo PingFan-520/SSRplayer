@@ -47,7 +47,7 @@ module audio_meter #(
     reg [7:0] bars [0:NBAR-1];
     reg [7:0] peak;
     reg       warm = 1'b0;         // 0 = 还没填过（上电/换曲/静音后第一次推列）
-    reg [2:0] quiet;               // 连续静音帧数
+    reg [5:0] quiet;               // 连续静音帧数（到 45 帧 = 1.5s 认为换曲/停播）
 
     integer i;
 
@@ -63,13 +63,13 @@ module audio_meter #(
             // 连续 6 帧没声音就重新进入"未预热"状态：
             // 换曲/暂停后再出声时会重新把 128 列铺满，而不是从右边慢慢长
             if (peak == 8'd0 && level == 8'd0) begin
-                if (quiet != 3'd7) quiet <= quiet + 3'd1;
+                if (quiet != 6'd45) quiet <= quiet + 6'd1;
             end else begin
-                quiet <= 3'd0;
+                quiet <= 6'd0;
             end
 
             if (frame_start) begin
-                if (quiet >= 3'd6) warm <= 1'b0;
+                if (quiet >= 6'd45) warm <= 1'b0;
                 if (!warm) begin
                     // 上电/换曲后的第一列：把 128 列全部填成当前值。
                     // 否则瀑布图要从右边慢慢长过来，128 列要 4 秒才铺满，
@@ -91,6 +91,7 @@ module audio_meter #(
     // 逐像素判断
     // ------------------------------------------------------------------
     localparam integer XW = NBAR * BARW;
+    localparam integer BW = $clog2(NBAR);     // 128 -> 7（BARW=8 时正好是 dx[9:3]）
 
     wire in_rect = enable &&
                    (x >= X0[11:0]) && (x < (X0 + XW)) &&
@@ -101,8 +102,16 @@ module audio_meter #(
 
     // bars[0] 是最新的一列，画在最右边（示波器/瀑布图习惯）
     // BARW=8 -> 柱索引 = dx/8（移位）；柱内 5 实 3 空 -> 每根更细
-    wire [6:0]  bi    = 7'd127 - dx[9:3];
-    wire        ingap = (dx[2:0] >= 3'd5);
+    //
+    // ★ 索引的基准必须跟 NBAR 走，不能写死 127：
+    //   上一版上层实例化时 NBAR=80，而这里写死 `7'd127 - ...`，
+    //   bi 会算到 48..127，对只有 80 项的 bars[] 越界读 ——
+    //   综合后取到的是无效数据，上板就只看得到一部分柱子
+    //   （"音频条只显示在图片右下角"）。
+    //   现在用 (NBAR-1) 推导，并且加一层越界钳位兜底。
+    wire [BW-1:0] cidx = dx[BW+2:3];              // dx / 8 = 第几列
+    wire [BW-1:0] bi   = (cidx > (NBAR-1)) ? (NBAR-1) : ((NBAR-1) - cidx);
+    wire          ingap = (dx[2:0] >= 3'd5);
 
     wire [7:0]  lv = bars[bi];
     // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）
