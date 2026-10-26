@@ -100,6 +100,7 @@ module tb_wav;
     wire [15:0] s_data;
 
     reg         f_busy = 1'b0, f_val = 1'b0;
+    reg         f_hold = 1'b0;
     reg  [15:0] f_data = 16'd0;
     reg  [31:0] f_sec  = 32'd0;
     integer     f_cnt = 0;
@@ -157,9 +158,12 @@ module tb_wav;
             if (s_start) begin
                 f_busy <= 1'b1;
                 f_cnt  <= 0;
-                f_sec  <= s_sec;
+                f_hold <= 1'b1;      // 地址在 s_start 之后一拍才稳定（与真实 sd_read 一致）
             end else if (f_busy) begin
-                if (f_cnt < 256) begin
+                if (f_hold) begin
+                    f_sec  <= s_sec;
+                    f_hold <= 1'b0;
+                end else if (f_cnt < 256) begin
                     f_data <= {card_byte(f_sec, f_cnt*2), card_byte(f_sec, f_cnt*2+1)};
                     f_val  <= 1'b1;
                     f_cnt  <= f_cnt + 1;
@@ -198,8 +202,12 @@ module tb_wav;
     integer sec_last  = -1;
     integer sec_wrap  = 0;      // 走满一轮回到起点的次数
 
+    reg s_start_d = 1'b0;
     always @(posedge clk_sd) begin
-        if (s_start && (s_sec != DIR_SEC)) begin
+        // 仲裁器在 grant 那一拍才把地址锁进 sec_hold，所以要看"下一拍"的 s_sec
+        // （真实 sd_read 是打两拍后锁存，这里取一拍足够）
+        s_start_d <= s_start;
+        if (s_start_d && (s_sec != DIR_SEC)) begin
             if (sec_first < 0) begin
                 sec_first  = s_sec;
                 sec_expect = s_sec;

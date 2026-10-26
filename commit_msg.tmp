@@ -1,0 +1,40 @@
+fix(sd): 仲裁器扇区地址必须锁存 —— 音频一直在读"图片扇区"（无声/6666/FFFF 的真因）
+
+卡是对的：sd_write_log.txt(10-26 15:06) 显示 57.09MB 整盘写入 + SHA256 全盘一致。
+所以问题在 RTL。
+
+## 真因
+sd_read.v 用 `pos_rd_en = ~rd_en_d1 & rd_en_d0` 做上升沿检测，也就是
+**rd_start_en 之后第 2 拍**才把 rd_sec_addr 装进 cmd_rd。
+而 sd_arb 原来写的是：
+    assign s_start = grant;
+    assign s_sec   = gnt_a ? a_sec : b_sec;   // grant 只持续 1 拍
+grant 消失后 s_sec 立刻回落成 b_sec（图片侧地址），于是 sd_read 锁进去的
+永远是图片当前那个扇区：
+  - 音频读目录(1024)      -> 实际发 2048（BMP 头）
+  - 音频读 18272+k        -> 实际发图片正在读的扇区
+表现：数码管 6666（照片像素）/ FFFF（白底图整扇区，镜像里有 1553 个全 FF 扇区）、
+彻底静音；图片侧因为 b_sec 恰好就是它要的地址，一切正常。
+
+修：grant 那拍把地址锁进 sec_hold，整个传输期间不变。
+
+## 新增 sim/tb_sd_full.v：位级 SD 链路仿真（这类 bug 以前抓不到）
+位级 SPI 从机（R1+0xFE+512B+CRC）-> 真实 sd_read -> sd_arb -> wav_player，
+同时挂一个假图片读取器不停抢总线：
+  [ok] 目录 magic OK（base=4096 长度=6 扇区）
+  [info] 比对 1000 个采样，错 0 个
+  [ok] 音频扇区序列正确（9 次请求，循环 2 次）
+  [info] 图片侧 好 512 / 坏 0
+  [PASS]
+（写 TB 时踩到位计数器 10 位溢出的坑：第 1024 bit 正好第 128 字节，
+ 表现是"前 59 个采样对、之后全乱"，加宽到 13 位解决。）
+
+## 配套
+tb_wav / tb_sd_chain 里假 SD 原来在 start 那拍取地址，也改成延一拍（与真实 sd_read 一致）。
+
+## 验证
+tb_sd_full PASS；tb_wav 两用例 PASS；tb_audio/tb_meter_full/tb_meter_wf/tb_sd_chain PASS
+lint 0/0；TD 综合 clk_pix 47.2MHz(+5.49ns)、clk_mem 106.2MHz(-1.42ns)、LUT 35.5% BRAM 31
+
+## 用户侧
+**不用重写 SD 卡**，只需 syn_1 -> phy_1。

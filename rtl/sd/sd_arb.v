@@ -59,26 +59,36 @@ module sd_arb (
     reg  [4:0] gap;             // 等 busy 的超时
     reg [18:0] wdog;            // active 的粗看门狗（约 20ms @25MHz）
 
+    reg [31:0] sec_hold;        // 本次传输的扇区地址（在 grant 那拍锁存）
+
     wire idle  = ~active & ~s_busy;
     wire gnt_a = idle & sd_init_done &  a_req;
     wire gnt_b = idle & sd_init_done & ~a_req & b_req;
     wire grant = gnt_a | gnt_b;
 
-    // 地址必须组合选择：owner 下一拍才更新，用 owner 选会送错地址
+    // ★ 地址必须**锁存**，不能用组合选择！
+    //   sd_read 是在 rd_start_en 之后第 2 拍才把 rd_sec_addr 装进 cmd_rd
+    //   （rd_start_en 打两拍做上升沿检测）。如果用 `gnt_a ? a_sec : b_sec`，
+    //   那时 grant 早就是 0 了，s_sec 会回落成 b_sec ——
+    //   音频读到的永远是**图片侧当前的扇区**（回读的就是 BMP 像素，
+    //   上板表现为音频无声 + 数码管显示 6666/FFFF）。
+    //   锁存之后就与"谁什么时候锁地址"彻底解耦。
     assign s_start = grant;
-    assign s_sec   = gnt_a ? a_sec : b_sec;
+    assign s_sec   = sec_hold;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             active    <= 1'b0;
             seen_busy <= 1'b0;
             owner     <= 1'b1;
+            sec_hold  <= 32'd0;
             gap       <= 5'd0;
             wdog      <= 19'd0;
         end else if (grant) begin
             active    <= 1'b1;
             seen_busy <= 1'b0;
             owner     <= gnt_a;
+            sec_hold  <= gnt_a ? a_sec : b_sec;   // 锁存，整个传输期间不变
             gap       <= 5'd0;
             wdog      <= 19'd0;
         end else if (active) begin

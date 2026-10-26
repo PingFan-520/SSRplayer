@@ -111,7 +111,7 @@ module tb_sd_chain;
     integer    f_wait, f_cnt;
     reg [31:0] f_sec;
 
-    assign s_busy = (f_st != 4'd0) && (f_st != 4'd1);
+    assign s_busy = (f_st == 4'd2) || (f_st == 4'd3) || (f_st == 4'd4);  // 命令/锁地址阶段不算 busy
     assign s_val  = (f_st == 4'd3) && (f_wait == 3);   // 每 4 拍一个单拍 val
     assign s_data = {mem[(f_sec*512 + f_cnt*2) % NBYTE],
                      mem[(f_sec*512 + f_cnt*2 + 1) % NBYTE]};
@@ -121,7 +121,8 @@ module tb_sd_chain;
             f_st <= 4'd0; f_wait <= 0; f_cnt <= 0; f_sec <= 0;
         end else begin
             case (f_st)
-                4'd0: if (s_start) begin f_sec <= s_sec; f_wait <= 0; f_st <= 4'd1; end
+                4'd0: if (s_start) begin f_st <= 4'd5; end      // 先等一拍再锁地址
+                4'd5: begin f_sec <= s_sec; f_wait <= 0; f_st <= 4'd1; end
                 4'd1: begin                      // 命令阶段
                     if (f_wait == 150) begin f_wait <= 0; f_st <= 4'd2; end
                     else f_wait <= f_wait + 1;
