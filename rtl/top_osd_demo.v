@@ -65,8 +65,9 @@ module top_osd_demo #(
     output wire [11:0] raw_y,        // 帧内行号 0..VTOTAL-1
     input  wire [7:0]  dbg_ext,      // 调试字（SD/轮播状态），显示在数码管
     input  wire [15:0] dbg_hdr,      // 曲目首扇区第一个 16bit 字（trk_bad 时显示）
-    input  wire [7:0]  aud_lvl,      // 音频包络（含音量），给电平表
-    input  wire        aud_meter_en  // 1 = 显示音频电平表
+    input  wire signed [15:0] aud_samp,  // 48kHz 采样（给频谱分析）
+    input  wire        aud_samp_v,       // 采样有效
+    input  wire        aud_meter_en      // 1 = 显示频谱
 );
 
     wire rst = ~rst_n;
@@ -297,23 +298,31 @@ module top_osd_demo #(
     );
 
     // ------------------------------------------------------------------
-    // 音频电平可视化（扩展要求 5）
-    //   128 列 x 8px（5 实 3 空）= 1024 宽，正好铺满画面中段，
-    //   叠在图片下部（y 468..579），14 级纵向彩虹。
-    //   ★ NBAR 必须和 audio_meter 内部的索引推导一致（这里 128），
-    //     上一版这里还留着 80，内部却按 127 算索引 -> 越界读 -> 只显示一角。
+    // 音频频谱（扩展要求 5）
+    //   ★ 这里以前是"总电平的瀑布图"：128 列其实是同一个标量的历史，
+    //     看起来整排一起起伏。现在换成 spectrum.v 的 **32 段频段能量**，
+    //     每根柱对应 50Hz~16kHz 的一个对数频段，各段能量不同 ->
+    //     每根柱独立跳动（这才是频谱仪的观感）。
+    //   32 段 x 32px = 1024 宽，叠在图片下部（y 468..579）。
     // ------------------------------------------------------------------
     wire        m_on;
     wire [23:0] m_rgb;
     wire [3:0]  m_alpha;
+    wire [255:0] spec_bars;          // 32 段 x 8bit
+
+    spectrum #(.NB(32), .BLOCK(1024), .DECAY(6)) u_spec (
+        .clk(clk), .rst(rst),
+        .sample(aud_samp), .sample_valid(aud_samp_v),
+        .frame_start(frame_tick),
+        .bars(spec_bars)
+    );
 
     audio_meter #(
-        .X0(128), .Y0(468), .BARW(8), .NBAR(128), .MAXH(112)
+        .X0(128), .Y0(468), .BARW(32), .NBAR(32), .MAXH(112)
     ) u_meter (
         .clk(clk), .rst(rst),
         .x(xd3), .y(yd3),              // 早一拍，模块内部寄存后与视频对齐
-        .frame_start(frame_tick),      // 每帧只推一列 -> 帧内绝对稳定
-        .level(aud_lvl),
+        .bars(spec_bars),
         .enable(aud_meter_en & ef_meter & ~menu_open),
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );

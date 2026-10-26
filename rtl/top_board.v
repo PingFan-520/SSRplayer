@@ -215,7 +215,8 @@ module top_board #(
     wire [2:0]  dbg_mus;            // 菜单 MUS：0=关 1=内置 2..=SD 曲目
     wire        dbg_auto;           // 1=自动轮播
     wire        nav_next, nav_prev;  // 非菜单态下 KEY1/KEY2：下一张/上一张
-    wire [7:0]  aud_lvl;            // 音频包络（给电平表）
+    wire        aud_valid;          // 音频采样有效（给频谱）
+    wire [23:0] aud_left, aud_right; // 音频输出（24bit）
 
     // 淡入淡出转场：255=正常亮度，0=全黑。换 bank 发生在全黑那一刻，看不见。
     reg  [7:0]  fade_lvl;
@@ -868,7 +869,7 @@ module top_board #(
         .ext_rgb(fb_rgb),
         .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
         .dbg_ext(dbg_ext), .dbg_hdr(wav_hdr),
-        .aud_lvl(aud_lvl),
+        .aud_samp(aud_left[23:8]), .aud_samp_v(aud_valid),
         .aud_meter_en(1'b1)          // 音频电平表常开（想关掉改 0）
     );
 
@@ -904,8 +905,6 @@ module top_board #(
     // HDMI 音频：DDS 单音，音高跟随当前图片编号（换图变调 = 音视频联动）
     //   48kHz 采样，ACR: N=6144, CTS = 37.5MHz*6144/(128*48000) = 37500
     // ------------------------------------------------------------------
-    wire        aud_valid;
-    wire [23:0] aud_left, aud_right;
 
     wire        tone_valid;
     wire [23:0] tone_l, tone_r;

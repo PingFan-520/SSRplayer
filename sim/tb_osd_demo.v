@@ -54,7 +54,7 @@ module tb_osd_demo;
         .ext_rgb(16'd0),
         .raw_de(), .raw_x(), .raw_y(),
         .dbg_ext(8'd0),
-        .aud_lvl(8'd0), .aud_meter_en(1'b1)
+        .aud_samp(16'sd0), .aud_samp_v(1'b0), .aud_meter_en(1'b1)
     );
 
     // ------------------------------------------------------------------

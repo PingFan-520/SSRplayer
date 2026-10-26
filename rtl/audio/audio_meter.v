@@ -1,30 +1,25 @@
 // ============================================================================
-//  audio_meter.v —— 音频电平可视化（32 柱瀑布图 + 纵向彩虹渐变）
+//  audio_meter.v —— 32 段频谱柱（每根柱对应一个频段，独立跳动）
 //
-//  参考 设计参考文档/Music-Spectrum-main 的做法（FFT + 峰值衰减 + 彩虹色），
-//  本设计没有 FFT（音源是单音，做出来也只是一根柱子），但把它"好看"的
-//  几个要素照搬了：
-//    ① **逐帧刷新**：每帧只推一列，帧内画面绝对稳定。
-//       上一版每 512 拍推一列（一帧推 3 列、横向跳 24 像素），看起来就是"一直在闪"
-//    ② **纵向彩虹渐变**（红->橙->黄->绿->青->蓝），像真正的频谱仪
-//    ③ **峰值保持**：每列取这一帧内的峰值，而不是瞬时值
+//  这是第三次改造，前两次的教训写在这里：
+//    ① v1：每 512 采样推一列 —— 一帧推 3 列，柱子横向跳，看起来是频闪。
+//    ② v2：每帧写一个"总电平"的瀑布图 —— 128 列其实是**同一个标量**的历史，
+//       所以整排一起起伏，用户一眼就看出"这不是频谱"。
+//    ③ 现在：柱高来自 spectrum.v 的 32 个**频段能量**（对数分布 50Hz~16kHz），
+//       每段能量本来就不同 → 每根柱自然独立跳动。
 //
-//  几何：x 500..755（32 列 x 8 px），y 620..715（高 96）
-//        位于图片区（y 120..599）与菜单面板（y 110..609）下方的空白带，
-//        不遮挡任何内容。
-//
-//  输出是纯组合的，但路径很短（32:1 mux + 比较 + 颜色 case）。
-//  上一版在输出后又串了一级 alpha_blend（3 个 8x4 乘法器），与本级 mux 叠加
-//  把像素通路拉长；现在改成**直接选择**（下方是黑底，不需要混合），
-//  少了一整级乘法，也消除了"画面边缘撕裂"的隐患。
+//  几何：x 128..1151（32 段 × 32px = 1024），y 468..579（高 112）
+//        每段 29 像素实 + 3 像素隙。
+//  配色：纵向 14 级彩虹（dy[6:3] 直接做索引，零 ROM 零乘法器）。
+//  输出寄存一拍（坐标用 xd3/yd3 提前一拍算），像素通路只有"一级混合 + 一个选择器"。
 // ============================================================================
 `timescale 1ns / 1ps
 
 module audio_meter #(
     parameter integer X0   = 128,     // 面板左上角（比图片框更宽，铺满 1024）
     parameter integer Y0   = 468,     // 叠在图片下部
-    parameter integer BARW = 8,       // 每根柱子占 8 像素（**5 实 + 3 空**，更细）
-    parameter integer NBAR = 128,     // 128 列 x 8 = 1024 宽
+    parameter integer BARW = 32,      // 每根柱 32 像素（29 实 + 3 隙）
+    parameter integer NBAR = 32,      // 频段数（32 x 32 = 1024 宽）
     parameter integer MAXH = 112      // 柱区高度（像素）
 )(
     input  wire        clk,
@@ -32,8 +27,7 @@ module audio_meter #(
 
     input  wire [11:0] x,             // 已与视频对齐的坐标
     input  wire [11:0] y,
-    input  wire        frame_start,   // 帧首单拍：只在此时推进一列
-    input  wire [7:0]  level,         // 音频包络（含音量），48kHz 更新
+    input  wire [NBAR*8-1:0] bars,    // 每段的显示值 0..255（低频在低位）
     input  wire        enable,        // 0 = 不显示
 
     output reg         on,
@@ -41,115 +35,28 @@ module audio_meter #(
     output reg  [3:0]  alpha
 );
 
-    localparam integer XW = NBAR * BARW;
-    localparam integer BW = $clog2(NBAR);     // 128 -> 7（BARW=8 时正好是 dx[9:3]）
+    localparam integer XW = NBAR * BARW;      // 1024
 
-    // ------------------------------------------------------------------
-    // 柱子历史：**环形缓冲 + 写指针**，不做整体移位
-    //
-    //  ★ 上一版是 128 个寄存器每帧整列移位（`bars[i] <= bars[i-1]`）。
-    //    上板表现是"只有右半在动，左半一直停在峰值"——
-    //    典型的"综合把这种整列移位映射成了 SRL/移位链，而并行读只认到一部分抽头"。
-    //    改成写指针后，每帧只写 1 个单元、读地址做加法，就不再依赖工具怎么理解移位。
-    //
-    //    最新的一列写在 mem[wp]，下一帧 wp+1；
-    //    第 c 列（0=最左、NBAR-1=最右）读 mem[wp + c]（模 NBAR）：
-    //      c = NBAR-1 时地址是 wp-1 -> 正好是最新那一列（放在最右边）。
-    // ------------------------------------------------------------------
-    reg [7:0] hist [0:NBAR-1];
-    reg [7:0] peak;                // 本帧内的峰值
-    reg [BW-1:0] wp;               // 写指针
-    reg [5:0] quiet;               // 连续静音拍数（饱和 45）
-    reg       filling;             // 正在把整幅填成当前峰值（出声瞬间/复位后）
-    reg [BW-1:0] fill_i;
+    wire [11:0] dx = x - X0;
+    wire [11:0] dy = y - Y0;
 
-    // 静音很久之后又来声音 -> 立刻把整幅铺满，免得"从右边慢慢长"看起来像坏了
-    wire onset = (level != 8'd0) && (quiet >= 6'd45);
+    wire in_area = (x >= X0) && (x < X0 + XW) && (y >= Y0) && (y < Y0 + MAXH);
 
-    // 落柱：某一帧正好没有声音时不要直接把柱子清成 0（那样看着像"突然消失"），
-    // 而是在上一列的基础上每帧掉 8 格（30fps 下约 1 秒落到地）。
-    // 这也是参考工程 FFT_decay_mapper 的"衰减保持"观感。
-    localparam [7:0] DECAY = 8'd8;
-    wire [BW-1:0] paddr   = wp - 1'b1;
-    wire [7:0]    prev_lv = hist[paddr];
-    wire [7:0]    next_lv = (peak != 8'd0) ? peak :
-                            ((prev_lv > DECAY) ? (prev_lv - DECAY) : 8'd0);
+    // 第几段：BARW=32 -> dx[9:5]
+    wire [4:0]  cidx = dx[9:5];
+    wire        ingap = (dx[4:0] >= 5'd29);       // 3 像素间隙
 
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
-            peak    <= 8'd0;
-            wp      <= {BW{1'b0}};
-            quiet   <= 6'd45;      // 复位后第一次出声就铺满
-            filling <= 1'b0;
-            fill_i  <= {BW{1'b0}};
-        end else begin
-            if (level > peak)
-                peak <= level;
+    // 段高度：level(0..255) -> 0..MAXH
+    wire [7:0]  lv = bars[{cidx, 3'b000} +: 8];
+    wire [7:0]  hh = (lv > 8'd200) ? MAXH[7:0] : ((lv * 7) >> 3);
 
-            if (level == 8'd0) begin
-                if (quiet != 6'd45) quiet <= quiet + 6'd1;
-            end else begin
-                quiet <= 6'd0;
-            end
+    // 顶端条：柱顶再亮 2 像素，像真正的频谱仪
+    wire [7:0]  thr  = MAXH[7:0] - hh;
+    wire        filled = (dy[7:0] >= thr);
 
-            if (onset) begin
-                filling <= 1'b1;
-                fill_i  <= {BW{1'b0}};
-            end else if (filling) begin
-                hist[fill_i] <= (peak > level) ? peak : level;
-                if (fill_i == (NBAR-1)) filling <= 1'b0;
-                else                    fill_i  <= fill_i + 1'b1;
-            end else if (frame_start) begin
-                hist[wp] <= next_lv;       // 每帧只写一个单元（无声时按 DECAY 下落）
-                wp       <= wp + 1'b1;
-                peak     <= 8'd0;
-            end
-        end
-    end
-
-    // ------------------------------------------------------------------
-    // 逐像素判断
-    // ------------------------------------------------------------------
-
-    wire in_rect = enable &&
-                   (x >= X0[11:0]) && (x < (X0 + XW)) &&
-                   (y >= Y0[11:0]) && (y < (Y0 + MAXH));
-
-    wire [11:0] dx = x - X0[11:0];
-    wire [11:0] dy = y - Y0[11:0];
-
-    // bars[0] 是最新的一列，画在最右边（示波器/瀑布图习惯）
-    // BARW=8 -> 柱索引 = dx/8（移位）；柱内 5 实 3 空 -> 每根更细
-    //
-    // ★ 索引的基准必须跟 NBAR 走，不能写死 127：
-    //   上一版上层实例化时 NBAR=80，而这里写死 `7'd127 - ...`，
-    //   bi 会算到 48..127，对只有 80 项的 bars[] 越界读 ——
-    //   综合后取到的是无效数据，上板就只看得到一部分柱子
-    //   （"音频条只显示在图片右下角"）。
-    //   现在用 (NBAR-1) 推导，并且加一层越界钳位兜底。
-    wire [BW-1:0] cidx = dx[BW+2:3];              // dx / 8 = 第几列
-    wire [BW-1:0] bi   = (cidx > (NBAR-1)) ? (NBAR-1) : ((NBAR-1) - cidx);
-    wire          ingap = (dx[2:0] >= 3'd5);
-
-    // 读地址 = wp + cidx（模 NBAR）：最右列(cidx=127) 读到 wp-1 = 最新
-    wire [BW-1:0] raddr = wp + cidx;
-    wire [7:0]  lv = hist[raddr];
-    // 高度：0.625 x level（略微放大低电平，别让小声时柱子趴在地上）
-    wire [8:0]  hh  = {1'b0, lv[7:1]} + {2'b00, lv[7:3]};
-    wire [8:0]  hcl = (hh > MAXH[8:0]) ? MAXH[8:0] : hh;
-    wire [11:0] thr = MAXH[11:0] - {3'b000, hcl};
-
-    wire filled = in_rect && ~ingap && (dy >= thr);
-
-    // ------------------------------------------------------------------
-    // 纵向彩虹渐变：14 级（每 8 像素一级，正好是 dy[6:3]，纯移位不用除法）
-    //   顶部红/玫红 -> 橙 -> 黄 -> 绿 -> 青 -> 蓝 -> 紫（底部）
-    //   级别越多，渐变越细腻（参考 Music-Spectrum 的 128 级彩虹表思路，
-    //   这里只用 14 级 case，零 ROM 零乘法器）
-    // ------------------------------------------------------------------
-    wire [3:0] zc = dy[6:3];
-
-    reg [23:0] col;
+    // 纵向彩虹渐变：14 级（每 8 像素一级，正好 dy[6:3]，纯移位）
+    wire [3:0]  zc = dy[6:3];
+    reg  [23:0] col;
 
     always @(*) begin
         case (zc)
@@ -170,19 +77,309 @@ module audio_meter #(
         endcase
     end
 
-    // 输出寄存一拍：上层用 xd3/yd3（比视频早一拍）算，寄存后正好与视频对齐。
-    // 这样"32:1 mux + 比较 + 颜色 case"不再和菜单混合串在一条组合路径上，
-    // 像素通路比加电平表之前还短（上板"画面撕裂"的一半原因是这条路径太长）。
+    wire filled_ok = in_area & enable & ~ingap & filled;
+
+    // 输出寄存一拍：上层用 xd3/yd3（比视频早一拍）算，寄存后正好与视频对齐
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             on    <= 1'b0;
             rgb   <= 24'd0;
             alpha <= 4'd0;
         end else begin
-            on    <= filled;
+            on    <= filled_ok;
             rgb   <= col;
-            alpha <= filled ? 4'd8 : 4'd0;
+            alpha <= filled_ok ? 4'd8 : 4'd0;
         end
     end
+
+endmodule
+
+// ======================================================================
+//  下面是频谱分析（原本单独一个文件；TD 命令行不会重新读取新增的源文件条目，
+//  放在 audio_meter.v 里就始终能被编译到）
+// ======================================================================
+// ============================================================================
+//  spectrum.v —— 32 段实时频谱（Goertzel 滤波器组）
+//
+//  为什么不用"总响度瀑布"：
+//    之前的彩条画的是**同一个标量**（总电平）在不同帧的历史，
+//    128 列只是它的过去，所以看起来"整排一起跳动"。
+//    真正的频谱要让每根柱对应一个**频段**，各频段能量本来就不一样，
+//    才会出现"每条独立跳动"。
+//
+//  为什么用 Goertzel 而不是 FFT：
+//    · FFT 的频点是等间隔的（48k/128 = 375Hz 一格），低频全挤在一起，
+//      而这个板子的音乐能量主要在 100Hz~3kHz，需要**对数**分布；
+//      Goertzel 可以对任意指定频率求能量，直接做成对数频段。
+//    · 不需要位反转、不需要蝶形级联和整块 RAM，控制简单得多。
+//    · 资源：1 个乘法器 + 32×2 个 24bit 状态（时间复用，每采样 32 拍完成）。
+//
+//  算法（单频点 Goertzel）：
+//      s[n] = x[n] + 2cos(w)·s[n-1] − s[n-2]
+//      能量  ≈ s1² + s2²            （略去交叉项，只用于显示，单调即可）
+//    每 BLOCK 个采样算一次能量，然后把状态清零重新开始。
+//
+//  实现要点：
+//    · 32 个频段的状态放在**旋转队列**里：每次只处理队首，算完推回队尾。
+//      这样不需要 32 选 1 的大 mux，也不占 RAM。
+//    · 每 4 拍处理一个频段（取系数→乘→更新），一个采样 128 拍；
+//      48kHz 有 781 拍可用，余量充足。
+//    · 显示：视频帧首（30Hz）做一次"取大 + 衰减"，每根柱独立下落。
+// ============================================================================
+
+module spectrum #(
+    parameter integer NB    = 32,      // 频段数
+    parameter integer BLOCK = 1024,    // 每多少个采样算一次能量（1024/48k = 21.3ms，47Hz 分辨率）
+    parameter integer DECAY = 6        // 每帧最大下落量（30fps 下约 1 秒落地）
+)(
+    input  wire               clk,
+    input  wire               rst,
+    input  wire signed [15:0] sample,        // 48kHz 单声道
+    input  wire               sample_valid,
+    input  wire               frame_start,   // 视频帧首
+    output wire [NB*8-1:0]    bars           // 每段 0..255（低频在低位）
+);
+
+    // ---------------- 状态数组（旋转队列） ----------------
+    reg signed [23:0] s1 [0:NB-1];
+    reg signed [23:0] s2 [0:NB-1];
+    reg        [7:0]  mag  [0:NB-1];     // 本块能量（已压成 8bit）
+    reg        [7:0]  disp [0:NB-1];     // 显示值（带衰减）
+
+    localparam [2:0] S_IDLE = 3'd0,
+                     S_UA   = 3'd1,      // 取系数、发乘法
+                     S_UB   = 3'd2,      // 用乘法结果更新并旋转
+                     S_PA   = 3'd3,      // 块结束：算 s1^2 / s2^2 / coef*s1
+                     S_PC   = 3'd5,      // 块结束：算 coef*s1*s2
+                     S_PB   = 3'd4;      // 块结束：求和、压对数、清零
+
+    reg [2:0]  st;
+    reg [4:0]  bi;                 // 当前处理的频段
+    // 块内 |x| 累加：整块都没有输入（静音）时直接把各段置 0。
+    //   高 Q 谐振器在 24bit 定点下偶尔会出现很小的极限环（x=0 但状态不归零），
+    //   听感上是"音乐停了柱子却挂住"。有输入才显示，是最简单也最不会错的判据。
+    reg [23:0] xacc;
+    // 去直流：减去"上一段"的平均值。
+    //   ★ 一开始写的是 y = x - x_prev + y*(1-1/256) 的一极点高通，
+    //     但整数下 y - (y>>>8) 在 y<256 时恒等于 y —— 永远衰减不下去，
+    //     于是 xq 里留了一个固定直流，被 60Hz 那个高 Q 谐振器放大上万倍，
+    //     表现就是"所有低频柱一起亮到 130 左右、音乐停了也不落"。
+    //     按块减均值既彻底又只有一次减法。
+    reg signed [31:0] xsum;        // 本块采样和
+    reg signed [23:0] xmean;       // 上一块的均值
+    reg signed [9:0]  xq;          // 当前采样（缩到 10bit，控制位宽）
+    reg signed [39:0] mu1, mu2, mu3;   // 乘法结果
+    reg signed [39:0] mu4;
+    reg [10:0] blk;                // 块内采样计数
+    reg        merging;            // 正在做显示合并
+    reg        merge_req;          // 收到帧首（可能当时 FSM 正忙，先存着）
+    reg [4:0]  dbi;
+
+    localparam signed [15:0] K_DAMP = 16'sd16058;   // r^2，r=0.998 -> 极点略在单位圆内
+                                                 //   ★ 必须用 r^2 做常数项，只把中间系数乘 r
+                                                 //     会让极点仍在单位圆上（等于改频点），
+                                                 //     量化误差会累积成低频斜坡，低频段全部爆表。
+
+    // 去直流后的采样
+    wire signed [23:0] hp_x = $signed(sample) - xmean;
+
+    integer k;
+
+    // ---------------- 频段系数（Q14：2cos(2*pi*f/48000)） ----------------
+    // 50Hz ~ 16kHz，对数分布；高段给音乐留余量
+    reg signed [15:0] coef;
+    always @(*) begin
+        case (bi)
+            5'd0 : coef = 16'sd32439  ;   //     60 Hz
+            5'd1 : coef = 16'sd32439  ;   //     72 Hz
+            5'd2 : coef = 16'sd32438  ;   //     86 Hz
+            5'd3 : coef = 16'sd32437  ;   //    103 Hz
+            5'd4 : coef = 16'sd32436  ;   //    123 Hz
+            5'd5 : coef = 16'sd32434  ;   //    148 Hz
+            5'd6 : coef = 16'sd32432  ;   //    177 Hz
+            5'd7 : coef = 16'sd32428  ;   //    212 Hz
+            5'd8 : coef = 16'sd32422  ;   //    254 Hz
+            5'd9 : coef = 16'sd32415  ;   //    304 Hz
+            5'd10: coef = 16'sd32404  ;   //    364 Hz
+            5'd11: coef = 16'sd32388  ;   //    435 Hz
+            5'd12: coef = 16'sd32365  ;   //    521 Hz
+            5'd13: coef = 16'sd32332  ;   //    624 Hz
+            5'd14: coef = 16'sd32285  ;   //    748 Hz
+            5'd15: coef = 16'sd32218  ;   //    895 Hz
+            5'd16: coef = 16'sd32121  ;   //   1072 Hz
+            5'd17: coef = 16'sd31983  ;   //   1284 Hz
+            5'd18: coef = 16'sd31786  ;   //   1537 Hz
+            5'd19: coef = 16'sd31503  ;   //   1841 Hz
+            5'd20: coef = 16'sd31099  ;   //   2204 Hz
+            5'd21: coef = 16'sd30523  ;   //   2640 Hz
+            5'd22: coef = 16'sd29703  ;   //   3161 Hz
+            5'd23: coef = 16'sd28539  ;   //   3785 Hz
+            5'd24: coef = 16'sd26897  ;   //   4532 Hz
+            5'd25: coef = 16'sd24593  ;   //   5427 Hz
+            5'd26: coef = 16'sd21393  ;   //   6499 Hz
+            5'd27: coef = 16'sd17015  ;   //   7782 Hz
+            5'd28: coef = 16'sd11154  ;   //   9319 Hz
+            5'd29: coef = 16'sd3566   ;   //  11159 Hz
+            5'd30: coef = -16'sd5752  ;   //  13362 Hz
+            5'd31: coef = -16'sd16220 ;   //  16000 Hz
+            default: coef = 16'sd0;
+        endcase
+    end
+
+    // ---------------- 能量 -> 8bit（对数压缩） ----------------
+    // p 最大约 2^35；直接取高位做对数，让弱信号也能看见
+    function [7:0] log8;
+        input [39:0] p;
+        integer i, idx, v;
+        begin
+            idx = 0;
+            for (i = 0; i < 40; i = i + 1)
+                if (p[i]) idx = i;
+            if (idx <= 17) begin
+                log8 = 8'd0;
+            end else begin
+                v = (idx - 17) * 11
+                  + (p[idx-1] ? 5 : 0) + (p[idx-2] ? 3 : 0) + (p[idx-3] ? 1 : 0);
+                if (v > 255) v = 255;
+                log8 = v[7:0];
+            end
+        end
+    endfunction
+
+    // ---------------- 主状态机 ----------------
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            st      <= S_IDLE;
+            bi      <= 5'd0;
+            blk     <= 11'd0;
+            xacc    <= 24'd0;
+            xsum    <= 32'sd0;
+            xmean   <= 24'sd0;
+            xq      <= 10'sd0;
+            mu1     <= 40'sd0;
+            mu2     <= 40'sd0;
+            mu3     <= 40'sd0;
+            mu4     <= 40'sd0;
+            merging   <= 1'b0;
+            merge_req <= 1'b0;
+            dbi       <= 5'd0;
+            for (k = 0; k < NB; k = k + 1) begin
+                s1[k]   <= 24'sd0;
+                s2[k]   <= 24'sd0;
+                mag[k]  <= 8'd0;
+                disp[k] <= 8'd0;
+            end
+        end else begin
+            // ---- 显示合并：帧首触发，32 拍做完 ----
+            //   ★ 必须用 pending 标志：frame_start 只有 1 拍，如果正好落在
+            //     Goertzel 处理中（一个采样要几十拍），直接判 st==S_IDLE 会丢帧，
+            //     显示就冻住了（仿真里表现为柱子不衰减）。
+            if (frame_start) merge_req <= 1'b1;
+            if (!merging && merge_req) begin
+                merging   <= 1'b1;
+                merge_req <= 1'b0;
+                dbi       <= 5'd0;
+            end
+            if (merging) begin
+                disp[dbi] <= (mag[dbi] > disp[dbi]) ? mag[dbi]
+                          : ((disp[dbi] > DECAY) ? (disp[dbi] - DECAY) : 8'd0);
+                if (dbi == NB-1) merging <= 1'b0;
+                else             dbi     <= dbi + 5'd1;
+            end
+
+            // ---- Goertzel 更新 ----
+            case (st)
+                S_IDLE: if (sample_valid) begin
+                    xsum <= xsum + $signed(sample);
+                    xq   <= hp_x >>> 6;              // 缩到 10bit（-512..511）
+                    xacc <= xacc + ((hp_x[23] ? -hp_x : hp_x) >>> 6);   // 累加 |x|
+                    bi   <= 5'd0;
+                    st   <= S_UA;
+                end
+
+                S_UA: begin
+                    mu1 <= coef * s1[0];      // 16 x 24
+                    mu2 <= K_DAMP * s2[0];    // 阻尼项：极点半径 = r
+                    st  <= S_UB;
+                end
+
+                S_UB: begin
+                    // 队首算完推回队尾，其余整体前移一格
+                    for (k = 0; k < NB-1; k = k + 1) begin
+                        s1[k] <= s1[k+1];
+                        s2[k] <= s2[k+1];
+                    end
+                    s1[NB-1] <= $signed({{14{xq[9]}}, xq}) + ((mu1 + 40'sd8192) >>> 14)
+                                     - ((mu2 + 40'sd8192) >>> 14);
+                    s2[NB-1] <= s1[0];
+
+                    if (bi == NB-1) begin
+                        bi <= 5'd0;
+                        if (blk == BLOCK-1) begin
+                            blk <= 11'd0;
+                            st  <= S_PA;
+                        end else begin
+                            blk <= blk + 11'd1;
+                            st  <= S_IDLE;
+                        end
+                    end else begin
+                        bi <= bi + 5'd1;
+                        st <= S_UA;
+                    end
+                end
+
+                // ---- 块结束：每个频段算能量、压成 8bit、状态清零 ----
+                //  |X|^2 = s1^2 + s2^2 - coef*s1*s2 （漏掉交叉项会让低频段整体抬高）
+                S_PA: begin
+                    mu1 <= s1[0] * s1[0];
+                    mu2 <= s2[0] * s2[0];
+                    mu3 <= coef * s1[0];
+                    st  <= S_PC;
+                end
+
+                S_PC: begin
+                    mu4 <= mu3 * s2[0];
+                    st  <= S_PB;
+                end
+
+                S_PB: begin
+                    mag[bi] <= (xacc == 24'd0) ? 8'd0
+                             : log8(mu1 + mu2 - ((mu4 + 40'sd8192) >>> 14));
+                    for (k = 0; k < NB-1; k = k + 1) begin
+                        s1[k] <= s1[k+1];
+                        s2[k] <= s2[k+1];
+                    end
+                    s1[NB-1] <= 24'sd0;
+                    s2[NB-1] <= 24'sd0;
+                    if (bi == NB-1) begin
+                        bi   <= 5'd0;
+                        xacc <= 24'd0;          // 本块用完清零，开始统计下一块
+                        xmean <= xsum >>> 10;   // 下一块用它做去直流（BLOCK=1024）
+                        xsum  <= 32'sd0;
+                        // 一次性清零全部状态：旋转"旋入 0"依赖索引完全对齐，
+                        // 一旦错位就会残留 => 柱子挂住不动。直接清零最稳。
+                        for (k = 0; k < NB; k = k + 1) begin
+                            s1[k] <= 24'sd0;
+                            s2[k] <= 24'sd0;
+                        end
+                        st   <= S_IDLE;
+                    end else begin
+                        bi <= bi + 5'd1;
+                        st <= S_PA;
+                    end
+                end
+
+                default: st <= S_IDLE;
+            endcase
+        end
+    end
+
+    // ---------------- 输出 ----------------
+    genvar g;
+    generate
+        for (g = 0; g < NB; g = g + 1) begin : out_bars
+            assign bars[g*8 +: 8] = disp[g];
+        end
+    endgenerate
 
 endmodule

@@ -44,7 +44,7 @@ module tb_audio;
     );
 
     // ---------------- DUT 3：电平表 ----------------
-    reg  [7:0]  level = 8'd0;
+    reg  [255:0] bars_flat = 256'd0;   // 32 段高度
     reg         men   = 1'b1;
     wire        m_on;
     wire [23:0] m_rgb;
@@ -53,11 +53,10 @@ module tb_audio;
     reg  [11:0] mx = 12'd0, my = 12'd0;
     reg         mfs = 1'b0;            // 帧首（推一列）
 
-    audio_meter #(.X0(128), .Y0(468), .BARW(8), .NBAR(128), .MAXH(112)) u_m (
+    audio_meter #(.X0(128), .Y0(468), .BARW(32), .NBAR(32), .MAXH(112)) u_m (
         .clk(clk), .rst(rst),
         .x(mx), .y(my),
-        .frame_start(mfs),
-        .level(level), .enable(men),
+        .bars(bars_flat), .enable(men),
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );
 
@@ -196,49 +195,40 @@ module tb_audio;
         end
         vol_a = 4'd10;
 
-        // ---- 4) 电平表 ----
-        // level=255 -> 高度 0.625*255=159 被夹到 MAXH=96 -> 整列填满
-        level = 8'd255;
-        for (i = 0; i < 160; i = i + 1) push_col;      // 32 列全部填满
-        mx = 12'd131; my = 12'd468;      // 柱顶（dy=0）
+        // ---- 4) 频谱柱显示（直接给 32 段高度）----
+        bars_flat = {32{8'd255}};
+        mx = 12'd131; my = 12'd468;
         @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱顶未点亮"); errs = errs + 1; end
-        mx = 12'd131; my = 12'd579;      // 柱底（dy=103）
-        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱底未点亮"); errs = errs + 1; end
-        mx = 12'd133; my = 12'd520;      // dx=14 -> 柱子间隙
-        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 柱子间隙不该点亮"); errs = errs + 1; end
-        mx = 12'd131; my = 12'd460;      // 面板上方（图片区下缘）
-        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 面板外不该点亮"); errs = errs + 1; end
-        mx = 12'd1155; my = 12'd520;      // 面板右侧（x 边界外，384+512=896）
-        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 面板外(右)不该点亮"); errs = errs + 1; end
-
-        // level=64 -> 高度 0.625*64=40 -> thr=56；dy=95 亮、dy=40 灭
-        level = 8'd64;
-        for (i = 0; i < 160; i = i + 1) push_col;
         mx = 12'd131; my = 12'd579;
-        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 低电平：柱底应点亮"); errs = errs + 1; end
-        mx = 12'd131; my = 12'd520;      // dy=40 < 64
-        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 低电平：柱高应较低（dy=40 不该亮）"); errs = errs + 1; end
+        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 满幅：柱底未点亮"); errs = errs + 1; end
+        mx = 12'd157; my = 12'd520;
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 柱子间隙不该点亮"); errs = errs + 1; end
+        mx = 12'd131; my = 12'd460;
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 区域外(上)不该点亮"); errs = errs + 1; end
+        mx = 12'd1160; my = 12'd520;
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 区域外(右)不该点亮"); errs = errs + 1; end
 
-        // 颜色分段：顶部红、底部蓝
-        level = 8'd255;
-        for (i = 0; i < 160; i = i + 1) push_col;
-        mx = 12'd131; my = 12'd473;      // dy=5 -> 红
+        bars_flat = {32{8'd64}};
+        mx = 12'd131; my = 12'd579;
+        @(posedge clk); #1; if (!m_on) begin $display("[FAIL] 低段：柱底应点亮"); errs = errs + 1; end
+        mx = 12'd131; my = 12'd508;
+        @(posedge clk); #1; if (m_on) begin $display("[FAIL] 低段：dy=40 不该亮"); errs = errs + 1; end
+
+        bars_flat = {32{8'd255}};
+        mx = 12'd131; my = 12'd473;
         @(posedge clk); #1; if (m_rgb !== 24'hFF1040) begin
-            $display("[FAIL] 顶部颜色 %06h，应为红 FF2A18", m_rgb); errs = errs + 1; end
-        mx = 12'd131; my = 12'd568;      // dy=96 -> 蓝
+            $display("[FAIL] 顶部颜色 %06h，应为 FF1040", m_rgb); errs = errs + 1; end
+        mx = 12'd131; my = 12'd564;
         @(posedge clk); #1; if (m_rgb !== 24'h7038F0) begin
-            $display("[FAIL] 底部颜色 %06h，应为蓝 3355FF", m_rgb); errs = errs + 1; end
-        $display("[ok] 电平表几何/间隙/颜色分段正确");
+            $display("[FAIL] 底部颜色 %06h，应为 7038F0", m_rgb); errs = errs + 1; end
+        $display("[ok] 频谱柱几何/间隙/颜色分段正确");
 
-        // ---- 5) 逐帧推一列，dump 成 PPM 看效果 ----
         begin : dump_meter
-            integer fd, bx, by, cc, lvv;
+            integer fd, bx, by, cc, hh2;
             for (i = 0; i < 32; i = i + 1) begin
-                lvv = 230 - (i % 8) * 24;              // 230,206,...,62 循环
-                level = lvv[7:0];
-                push_col;
+                hh2 = 250 - (i % 8) * 26;
+                bars_flat[i*8 +: 8] = hh2[7:0];
             end
-            level = 8'd0;
             fd = $fopen("meter_out.ppm", "wb");
             $fwrite(fd, "P6\n1024 112\n255\n");
             for (by = 0; by < 112; by = by + 1) begin
@@ -251,7 +241,7 @@ module tb_audio;
                 end
             end
             $fclose(fd);
-            $display("[ok] 电平表渲染图已写出 meter_out.ppm");
+            $display("[ok] 频谱柱渲染图已写出 meter_out.ppm");
         end
 
         if (errs == 0) $display("[PASS] 音频通路全部用例通过");
