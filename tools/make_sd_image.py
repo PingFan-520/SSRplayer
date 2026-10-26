@@ -13,6 +13,10 @@ make_sd_image.py —— 生成 SD 卡裸扇区镜像（不实现 FAT32）
     所以每张图只读自己的实际长度 —— 640x480 的图读 1801 扇区，
     1280x720 的图读 5401 扇区，不会因为配额大而变慢。
 
+音乐区（tools/make_sd_image.py 自动处理）：
+    扇区 1024      = 音乐目录 "MDIR"（每首的 base + 扇区数），RTL 从这里读布局
+    音乐区         = 裸 PCM（单声道 16bit 48kHz），每 16bit 字就是一个采样
+
 为什么用裸扇区：
     参考工程也是这个策略。做 FAT32 得实现目录遍历和簇链，工作量与风险都大得多。
 
@@ -36,6 +40,8 @@ SEC_SIZE   = 512
 BMP_MAX_W  = 4096      # bmp_decode 的 o_sx 是 12 位
 BMP_MAX_H  = 4096
 WAV_SR     = 48000     # 必须与 HDMI 的 ACR 一致（N=6144/CTS=37500 @37.5MHz）
+MUS_DIR_SEC = 1024     # 音乐目录扇区（图片从 2048 开始，1024 永远空着）
+MUS_MAGIC   = b"MDIR"  # 目录扇区的前 4 字节
 
 
 def probe_bmp(path):
@@ -168,7 +174,9 @@ def main():
             ch, rate, bits, data = read_wav(p)
         except Exception as e:
             raise SystemExit("%s : %s" % (os.path.basename(p), e))
-        blob = wav_canonical(data)
+        # 写进镜像的是**裸 PCM**：RTL 侧每个 16bit 字就是一个采样，
+        # 不用跳 44 字节头、不用解析 data size —— 那两件事都反复出过错。
+        blob = data
         wav_info.append((p, blob, "%d 采样 (%.1f 秒)" % (len(data) // 2, len(data) / 2.0 / WAV_SR)))
 
     mus_base   = SEC_BASE + len(files) * stride
@@ -187,12 +195,29 @@ def main():
         print("[%d] %-40s %7d 字节 @扇区 %-6d %s"
               % (i, os.path.basename(p), len(data), SEC_BASE + i * stride, msg))
 
-    # ---- 写音乐区 ----
+    # ---- 写音乐区（裸 PCM）----
     for i, (p, blob, msg) in enumerate(wav_info):
         base = (mus_base + i * mus_stride) * SEC_SIZE
         buf[base:base + len(blob)] = blob
         print("[M%d] %-39s %7d 字节 @扇区 %-6d %s"
               % (i + 1, os.path.basename(p), len(blob), mus_base + i * mus_stride, msg))
+
+    # ---- 音乐目录扇区（RTL 从这里读布局，不再靠 RTL 里的常量）----
+    # 布局（16bit 小端字，sd_read 给的就是这个顺序）：
+    #   w0 = "MD"  w1 = "IR"  w2 = count | (ver<<8)
+    #   w4+4i .. w7+4i = 曲目 i+1 : base_lo, base_hi, secs_lo, secs_hi
+    if wav_info:
+        d = bytearray(SEC_SIZE)
+        d[0:4] = MUS_MAGIC
+        d[4:6] = struct.pack("<H", (len(wav_info) & 0xFF) | (1 << 8))
+        for i, (p, blob, msg) in enumerate(wav_info):
+            base_sec = mus_base + i * mus_stride
+            nsec = sectors(len(blob))
+            o = 8 + 8 * i
+            d[o:o+8] = struct.pack("<II", base_sec, nsec)
+        buf[MUS_DIR_SEC * SEC_SIZE:(MUS_DIR_SEC + 1) * SEC_SIZE] = d
+        print("目录扇区 %d: %d 首（RTL 从这里读 base/长度，改布局不用改 RTL）"
+              % (MUS_DIR_SEC, len(wav_info)))
 
     with open(out, "wb") as f:
         f.write(buf)
@@ -201,8 +226,9 @@ def main():
     print("共 %d 张图、%d 首音乐，镜像 %d 字节 (%.2f MB)"
           % (len(files), len(wav_info), total, total / 1048576.0))
     if wav_info:
-        print("       ↑ 音乐区：把 MUS_BASE=%d、MUS_STRIDE=%d、MUS_NUM=%d 抄进 rtl/top_board.v"
-              % (mus_base, mus_stride, len(wav_info)))
+        print("       ↑ 音乐区 MUS_BASE=%d MUS_STRIDE=%d，目录扇区 %d（RTL 从目录读布局，"
+              % (mus_base, mus_stride, MUS_DIR_SEC))
+        print("         只需在 top_board.v 里把 MUS_NUM 改成 %d）" % len(wav_info))
     print()
     print("下一步：tools\\write_sd.bat 右键以管理员身份运行，把镜像写进 SD 卡。")
     print("注意：写入会覆盖卡的分区表，写完后卡在 Windows 里不可读，属正常。")

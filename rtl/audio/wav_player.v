@@ -1,28 +1,36 @@
 // ============================================================================
-//  wav_player.v —— 从 SD 卡播放 WAV（单声道 16bit 48kHz）
+//  wav_player.v —— 从 SD 卡播放音乐（裸 PCM / 单声道 16bit / 48kHz）
 //
-//  格式约定（PC 端 tools/make_sd_image.py 保证）：
-//    每个曲目 = 标准 44 字节 WAV 头 + PCM 数据，单声道 / 16bit / 48kHz。
-//    单声道是关键：SD 每来一个 16bit 字正好是一个采样
-//    （SPI 先收到的字节落在 data[15:8]，所以 sample = {data[7:0], data[15:8]}）。
-//    立体声就得两字节配对，多一层状态机，而音乐相框并不需要立体声。
+//  ★ 这一版和之前的根本区别：**布局从卡上读，RTL 里不再有绝对扇区常量**
+//
+//  卡上的布局（tools/make_sd_image.py 保证）：
+//    扇区 DIR_SEC(=1024) ：「音乐目录」，512 字节
+//        w0 = 0x444D ("MD")   w1 = 0x5249 ("IR")   w2 = 曲目数 | (版本<<8)
+//        w4+4i .. w7+4i = 曲目 i+1 : base_lo, base_hi, 扇区数_lo, 扇区数_hi
+//    扇区 base(曲目 i)   ：**裸 PCM**，每 16bit 字就是一个采样
+//
+//  为什么改成这样（都是踩过的坑）：
+//    ① 以前 RTL 里写死 MUS_BASE，镜像一改布局（8 图 4 曲 -> 3 图 2 曲）就对不上，
+//       卡上读到的是图片像素，当 PCM 播出去就是尖锐噪声；而且**看不出来**。
+//    ② 以前要解析 WAV 头（跳 44 字节 + 读 data size）。ffmpeg 会在头里插 LIST 块，
+//       data 就不在 44 字节处，读到的“长度”其实是 LIST 的 size，循环点全错。
+//    ③ 现在 RTL 只需要“从目录拿 base/长度”，一个字节都不用猜：
+//       目录 magic 不对 -> 直接静音 + 数码管报警（绝不把图片当音乐播）。
 //
 //  结构：
-//    SD 域(25MHz)：按扇区连续读 → 跳过 44 字节头 → 每字一个采样 → 异步 FIFO
-//    像素域(37.5MHz)：按 48kHz 节拍取一个采样 → 乘音量 → 24bit 送 HDMI
-//    长度直接解析 WAV 头里的 data size（第 20/21 个字），循环点精确、无填充静音。
+//    SD 域(25MHz)：读目录扇区 -> 按扇区连续读 -> 每字一个采样 -> 异步 FIFO
+//    像素域(37.5MHz)：48kHz 节拍取一个采样 -> 乘音量 -> 24bit 送 HDMI
 //
 //  为什么 FIFO 要 1024 深：
 //    一个扇区 = 256 采样 = 5.3ms；1024 深 ≈ 21ms。
 //    换图时 SD 总线被图片读取占用（音频优先但仍按扇区抢），需要这点余量兜住。
+//    不要再加大：2048 要多占 2 块 M9K，这块板 BRAM 余量很紧。
 // ============================================================================
 `timescale 1ns / 1ps
 
 module wav_player #(
-    parameter integer SEC_BASE   = 45312,   // 音乐区起始扇区
-    parameter integer SEC_STRIDE = 8952,    // 每首占的扇区数
-    parameter integer TRK_NUM    = 4,       // 曲目数
-    parameter integer HDR_WORDS  = 22,      // 44 字节头 = 22 个 16bit 字
+    parameter integer DIR_SEC    = 1024,     // 音乐目录扇区（永远在图片区之前）
+    parameter integer TRK_NUM    = 4,        // 曲目数
     parameter integer CLK_HZ     = 37_500_000,
     parameter integer SAMPLE_HZ  = 48_000
 )(
@@ -45,8 +53,8 @@ module wav_player #(
     output reg  [23:0] aud_left,
     output reg  [23:0] aud_right,
     output wire [7:0]  level,        // 当前电平（给可视化）
-    output wire        trk_bad,      // 1 = 曲目起点的头不是 RIFF（卡镜像/参数不匹配）
-    output wire [15:0] dbg_hdr       // 曲目首扇区第一个 16bit 字（调试：0x4952='RI'）
+    output wire        trk_bad,      // 1 = 目录无效（卡不是当前镜像）
+    output wire [15:0] dbg_hdr       // 目录扇区第一个字（数码管诊断用）
 );
 
     // ==================================================================
@@ -68,17 +76,22 @@ module wav_player #(
 
     wire        en      = (trk_s2 != 3'd0) && (trk_s2 <= TRK_NUM[2:0]);
     wire        trk_chg = (trk_s2 != trk_d);
-    wire [31:0] trk_base = SEC_BASE[31:0] +
-                           (({29'd0, trk_s2} - 32'd1) * SEC_STRIDE);
+    wire [1:0]  tidx    = trk_s2[1:0] - 2'd1;   // 0..3（trk_s2=0 时不用）
 
     // ==================================================================
-    // 2) SD 域：按扇区读 + 跳头 + 拆采样
+    // 2) SD 域状态机
     // ==================================================================
-    localparam [2:0] S_IDLE = 3'd0,
-                     S_REQ  = 3'd1,   // 已发请求，等 256 个字
-                     S_NEXT = 3'd2;   // 一个扇区收完，等 busy 落下
+    localparam [2:0] S_DREQ = 3'd0,   // 请求目录扇区
+                     S_DRCV = 3'd1,   // 收目录扇区
+                     S_DEND = 3'd2,   // 等 busy 落下 -> 校验 magic
+                     S_IDLE = 3'd3,   // 准备读音频
+                     S_REQ  = 3'd4,   // 已发请求，等 256 个字
+                     S_NEXT = 3'd5;   // 一个扇区收完，等 busy 落下
 
-    // FIFO 状态（声明要放在使用它的状态机之前）
+    localparam [15:0] MAG0 = 16'h444D;   // "MD"（小端：先 'M' 后 'D'）
+    localparam [15:0] MAG1 = 16'h5249;   // "IR"
+
+    // FIFO 状态（声明放在使用它的状态机之前）
     wire        fifo_full, fifo_empty, fifo_rvld;
     wire [15:0] fifo_dout;
     wire [10:0] fifo_used;
@@ -87,92 +100,121 @@ module wav_player #(
     reg        bsync;             // 已经看到本扇区的 busy 上升沿
     reg [31:0] sec_cnt;           // 本曲第几个扇区
     reg [8:0]  wcnt;              // 本扇区已收字数
-    reg [15:0] len_lo, len_hi;    // WAV 头里的 data size
-    reg [15:0] hdr0, hdr1;        // 曲目首扇区的头两个字（应为 "RI" "FF"）
-    reg        hdr_wav;           // 1 = 该曲目起点确实是 RIFF/WAVE
-    reg        hdr_chk;           // 已经读到第 2 个扇区，校验结果有效
 
-    wire [7:0]  hdr_i   = wcnt[7:0];
-    wire        is_hdr  = (sec_cnt == 32'd0) && (hdr_i < HDR_WORDS[7:0]);
-    wire [15:0] word_le = {s_data[7:0], s_data[15:8]};
+    reg [15:0] dw [0:19];         // 目录扇区前 20 个字（magic + 4 首的 base/长度）
+    reg [31:0] tbase [0:3];       // 每首起始扇区
+    reg [31:0] tlen  [0:3];       // 每首扇区数（精确，循环点无填充静音）
+    reg        dir_ok;            // 目录有效
+    reg        dir_tried;         // 至少尝试过一次（trk_bad 才有意义）
+    reg [23:0] retry;             // 目录读失败后的重试间隔计数
 
-    // 由头部长度算出的扇区数（组合，头部一收齐就生效；异常时退回 stride）
-    wire [31:0] len_b    = {len_hi, len_lo};
-    wire [31:0] sl_raw   = ((len_b >> 1) + 32'd255) >> 8;
-    // 长度太短（<8 扇区，约 2 秒）或超出配额，都认为头没读对，退回整段 stride
-    wire [31:0] sl       = ((sl_raw < 32'd8) || (sl_raw > SEC_STRIDE[31:0]))
-                           ? SEC_STRIDE[31:0] : sl_raw;
+    wire [15:0] word_le = {s_data[7:0], s_data[15:8]};   // SPI 先到的字节在高位
+
+    wire [31:0] cur_base = tbase[tidx];
+    wire [31:0] cur_len  = tlen[tidx];
+
+    integer k;
 
     always @(posedge clk_sd or posedge rst) begin
         if (rst) begin
-            st      <= S_IDLE;
-            s_req   <= 1'b0;
-            s_sec   <= 32'd0;
-            sec_cnt <= 32'd0;
-            wcnt    <= 9'd0;
-            len_lo  <= 16'd0;
-            len_hi  <= 16'd0;
-            bsync   <= 1'b0;
-            hdr0    <= 16'd0;
-            hdr1    <= 16'd0;
-            hdr_wav <= 1'b0;
-            hdr_chk <= 1'b0;
+            st        <= S_DREQ;
+            s_req     <= 1'b0;
+            s_sec     <= 32'd0;
+            sec_cnt   <= 32'd0;
+            wcnt      <= 9'd0;
+            bsync     <= 1'b0;
+            dir_ok    <= 1'b0;
+            dir_tried <= 1'b0;
+            retry     <= 24'd0;
+            for (k = 0; k < 4; k = k + 1) begin
+                tbase[k] <= 32'd0;
+                tlen[k]  <= 32'd0;
+            end
         end else begin
-            // 曲目起点必须是 RIFF/WAVE，否则说明 SD 卡上的镜像和 RTL 的参数对不上
-            // （音乐区扇区号变了、卡没重写）。这时**宁可不放**，也不要拿图片像素
-            // 当 PCM 播出去 —— 那正是一段段的"尖锐爆音"。
-            hdr_wav <= (hdr0 == 16'h4952) && (hdr1 == 16'h4646);
-            if (sec_cnt >= 32'd2) hdr_chk <= 1'b1;
-
             case (st)
-                S_IDLE: begin
-                    s_req <= 1'b0;
+                // ---------------- 读目录扇区 ----------------
+                S_DREQ: begin
+                    s_req <= 1'b1;
+                    s_sec <= DIR_SEC[31:0];
                     wcnt  <= 9'd0;
                     bsync <= 1'b0;
-                    if (en) begin
-                        sec_cnt <= 32'd0;
-                        s_sec   <= trk_base;
-                        s_req   <= 1'b1;
-                        st      <= S_REQ;
+                    st    <= S_DRCV;
+                end
+
+                S_DRCV: begin
+                    if (s_busy) bsync <= 1'b1;
+                    if (bsync && s_val) begin
+                        if (wcnt < 9'd20) dw[wcnt[4:0]] <= word_le;
+                        if (wcnt == 9'd255) begin
+                            wcnt  <= 9'd0;
+                            s_req <= 1'b0;
+                            bsync <= 1'b0;
+                            st    <= S_DEND;
+                        end else wcnt <= wcnt + 9'd1;
                     end
                 end
 
+                S_DEND: begin
+                    // 等 busy 真正落下，再判 magic
+                    if (!s_busy) begin
+                        dir_tried <= 1'b1;
+                        if ((dw[0] == MAG0) && (dw[1] == MAG1)) begin
+                            dir_ok <= 1'b1;
+                            retry  <= 24'd0;
+                            for (k = 0; k < 4; k = k + 1) begin
+                                tbase[k] <= {dw[4*k+5], dw[4*k+4]};
+                                tlen[k]  <= {dw[4*k+7], dw[4*k+6]};
+                            end
+                        end else begin
+                            dir_ok <= 1'b0;
+                            retry  <= 24'd0;
+                        end
+                        st <= S_IDLE;
+                    end
+                end
+
+                // ---------------- 正常播放 ----------------
+                S_IDLE: begin
+                    s_req <= 1'b0;
+                    if (dir_ok) begin
+                        if (en && (cur_len != 32'd0)) begin
+                            sec_cnt <= 32'd0;
+                            s_sec   <= cur_base;
+                            wcnt    <= 9'd0;
+                            bsync   <= 1'b0;
+                            s_req   <= 1'b1;
+                            st      <= S_REQ;
+                        end
+                    end else if (retry == 24'hFFFFFF) begin
+                        st <= S_DREQ;          // 约 0.67 秒后重试读目录
+                    end else
+                        retry <= retry + 24'd1;
+                end
+
                 S_REQ: begin
-                    // 先等 busy 起来 = 这一扇区真正开始，之后收到的字才算本扇区的数据。
-                    // 没有这一步，上一扇区尾巴/CRC 的字会被当成本扇区的开头，
-                    // 整条流就永久错位（听感是持续的"尖锐沙沙"）。
                     if (s_busy) bsync <= 1'b1;
-
                     if (bsync && s_val) begin
-                        // 抓长度：第 20/21 个字（字节 40..43 = data size）
-                        if ((sec_cnt == 32'd0) && (hdr_i == 8'd20)) len_lo <= word_le;
-                        if ((sec_cnt == 32'd0) && (hdr_i == 8'd21)) len_hi <= word_le;
-                        // 抓曲目开头的魔术字："RIFF" -> 字 0 = 0x4952、字 1 = 0x4646
-                        if ((sec_cnt == 32'd0) && (hdr_i == 8'd0)) hdr0 <= word_le;
-                        if ((sec_cnt == 32'd0) && (hdr_i == 8'd1)) hdr1 <= word_le;
-
                         if (wcnt == 9'd255) begin
                             wcnt  <= 9'd0;
                             s_req <= 1'b0;
                             bsync <= 1'b0;
                             st    <= S_NEXT;
-                        end else begin
+                        end else
                             wcnt <= wcnt + 9'd1;
-                        end
                     end
                 end
 
                 S_NEXT: begin
                     s_req <= 1'b0;
-                    // FIFO 快满就先别读：否则写不进去的采样会被直接丢掉
-                    //（仿真里表现为"隔一段少几个采样"）。留 324 字余量 > 一整个扇区。
+                    // FIFO 快满就先别读（留 324 字余量 > 一整个扇区），
+                    // 否则写不进去的采样会被静默丢掉
                     if (!s_busy && (fifo_used < 11'd700)) begin
-                        if (sec_cnt + 32'd1 >= sl) begin
+                        if (sec_cnt + 32'd1 >= cur_len) begin
                             sec_cnt <= 32'd0;
-                            s_sec   <= trk_base;              // 循环
+                            s_sec   <= cur_base;              // 循环
                         end else begin
                             sec_cnt <= sec_cnt + 32'd1;
-                            s_sec   <= trk_base + sec_cnt + 32'd1;
+                            s_sec   <= cur_base + sec_cnt + 32'd1;
                         end
                         s_req <= 1'b1;
                         st    <= S_REQ;
@@ -182,15 +224,16 @@ module wav_player #(
                 default: st <= S_IDLE;
             endcase
 
-            // 切曲 / 关闭：回到起点
-            if (trk_chg || !en) begin
+            // 切曲 / 关闭：只中断**正在进行的音频扇区**。
+            //   ★ 不能无条件把 st 拉回 S_IDLE：上电时 en 还是 0（track 要同步两级），
+            //     那样会连目录都读不到，然后卡在 S_IDLE 等 0.67 秒重试。
+            //     目录与曲目无关，任何情况下都不打断目录读。
+            if ((trk_chg || !en) && ((st == S_REQ) || (st == S_NEXT))) begin
                 st      <= S_IDLE;
                 s_req   <= 1'b0;
                 sec_cnt <= 32'd0;
                 wcnt    <= 9'd0;
-                hdr0    <= 16'd0;          // 换曲后重新校验一次
-                hdr1    <= 16'd0;
-                hdr_chk <= 1'b0;
+                bsync   <= 1'b0;
             end
         end
     end
@@ -199,13 +242,11 @@ module wav_player #(
     // 3) 异步 FIFO：SD 域写、像素域读
     // ==================================================================
     reg         fifo_rd;
-    // ★ 写 FIFO 必须同时满足 bsync：只有"本扇区 busy 起来之后"收到的字才算数据。
-    //   少了 bsync，上一扇区的尾巴/CRC、或仲裁器切主时残留的字都会被写进 FIFO，
-    //   整个采样流从此错位半个采样 —— 听感就是"尖锐的沙沙/爆音"。
-    wire        fifo_wr = s_val & bsync & hdr_wav & ~is_hdr & ~fifo_full;
+    // 每个字就是一个采样（裸 PCM，没有头要跳过）。
+    // bsync 必不可少：只有“本扇区 busy 起来之后”收到的字才算数据，
+    // 否则上一扇区尾巴/仲裁切主时残留的字会被写进 FIFO，整条流从此错位。
+    wire        fifo_wr = s_val & bsync & en & dir_ok & ~fifo_full;
 
-    // 深度固定 1024（21ms）。**不要再加大**：2048 要多占 2 块 M9K，
-    // 这块板的 BRAM/布线余量很紧，实测会花屏（Incremental route 挤爆）。
     afifo #(.DW(16), .AW(10)) u_fifo (
         .clk_w(clk_sd), .clk_r(clk),
         .aclr(rst | trk_chg),
@@ -232,8 +273,9 @@ module wav_player #(
     end
 
     reg signed [15:0] samp;
+    reg [11:0]        starve;      // 连续多少次节拍没拿到数据
 
-    // 音量 0..10 -> 8 位增益（与 tone_gen 同一张表）
+    // 音量 0..10 -> 9 位增益（与 tone_gen 同一张表）
     reg [8:0] vol_g;
     always @(*) begin
         case (vol)
@@ -257,21 +299,25 @@ module wav_player #(
     wire        [23:0] scaled = { {2{g16[15]}}, g16, 8'd0 };
     wire        [15:0] mag    = g16[15] ? (~g16 + 16'd1) : g16;
 
-    assign level = mag[15:7];                  // 0..255
-    assign trk_bad = hdr_chk & ~hdr_wav;        // 数码管上用 F 提示"卡不对"
-    assign dbg_hdr = hdr0;                      // 数码管上直接看这个字：
-                                                //   4952 = "RI"（对）
-                                                //   4D42 = "BM"（该扇区是 BMP -> 卡没重写）
-                                                //   0000 = 根本没读到数据
+    assign level   = mag[15:7];                     // 0..255
+    assign trk_bad = dir_tried & ~dir_ok;           // 卡上目录无效
+    assign dbg_hdr = dw[0];                         // 数码管：目录扇区第一个字
+                                                    //   444D = "MD"（正常，不该看到）
+                                                    //   424D = "BM"（读到的是图片 -> 卡不对）
+                                                    //   0000 = 目录扇区是空的（旧镜像/没写进去）
 
-    // aud_valid 必须**严格 48kHz 连续**：HDMI 核按 valid 采样，
-    // 一旦少给一拍，接收端音频 PLL 会抖 -> 尖锐爆音。
-    // FIFO 万一见底，就保持上一个采样（sample & hold），而不是留空拍。
+    // ==================================================================
+    // 5) 输出：aud_valid 严格 48kHz 连续
+    //    HDMI 核按 valid 采样，一旦少给一拍，接收端音频 PLL 会抖 -> 爆音。
+    //    FIFO 见底时保持上一个采样；但长期（>80ms）没数据就归零，
+    //    否则电平表会一直挂着一根不动的柱子。
+    // ==================================================================
     reg tick_d, tick_d2, tick_d3;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             samp      <= 16'sd0;
+            starve    <= 12'd0;
             tick_d    <= 1'b0;
             tick_d2   <= 1'b0;
             tick_d3   <= 1'b0;
@@ -282,7 +328,14 @@ module wav_player #(
             tick_d  <= tick;
             tick_d2 <= tick_d;
             tick_d3 <= tick_d2;
-            if (fifo_rvld) samp <= $signed(fifo_dout);
+
+            if (fifo_rvld) begin
+                samp   <= $signed(fifo_dout);
+                starve <= 12'd0;
+            end else if (tick) begin
+                if (starve != 12'hFFF) starve <= starve + 12'd1;
+                else                   samp   <= 16'sd0;
+            end
 
             // aud_valid 比 tick 晚 3 拍：此时 samp 已经是本次弹出的采样，
             // 与 aud_left 严格同拍（第 k 个 valid 就是文件第 k 个采样）

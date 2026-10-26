@@ -42,9 +42,9 @@ module top_board #(
     parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
     parameter integer IMG_NUM    = 3,         // 循环张数（图片资源/ 里的 BMP 数）
     // 音乐区（tools/make_sd_image.py 会打印这三个数）
-    parameter integer MUS_BASE   = 18272,     // 音乐区起始扇区
-    parameter integer MUS_STRIDE = 49328,     // 每首占的扇区数
-    parameter integer MUS_NUM    = 2,         // 曲目数
+    // 音乐区布局由卡上的「目录扇区」给出，RTL 里不再写死 base/stride
+    parameter integer MUS_DIR_SEC = 1024,     // 音乐目录扇区（tools/make_sd_image.py 写）
+    parameter integer MUS_NUM     = 2,        // 曲目数（只用于菜单上限）
     parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
     // 双缓冲开关：1 = 双缓冲（换图/淡入淡出转场必须用它）；0 = 单缓冲（换图黑一下）
     //   ★ 2026-10-25：从 0 改回 1。
@@ -931,7 +931,7 @@ module top_board #(
     wire [2:0] wav_trk = (dbg_mus >= 3'd2) ? (dbg_mus - 3'd1) : 3'd0;
 
     wav_player #(
-        .SEC_BASE(MUS_BASE), .SEC_STRIDE(MUS_STRIDE), .TRK_NUM(MUS_NUM),
+        .DIR_SEC(MUS_DIR_SEC), .TRK_NUM(MUS_NUM),
         .CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)
     ) u_wav (
         .clk     (clk_pix),

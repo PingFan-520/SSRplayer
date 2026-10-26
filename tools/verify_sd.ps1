@@ -114,40 +114,37 @@ try {
               $i, ($s.Pos / $SEC), $tag, $s.W, $s.H, $s.Bf, $diff)
     }
 
-    # ---------- 3. music slots (RIFF/WAVE), sector aligned ----------
-    #  RTL 里 MUS_BASE=18272 / MUS_STRIDE=49328（3 图之后），
-    #  wav_player 会校验曲目首扇区的头两个字是否为 "RI"/"FF"。
-    #  卡上这里若是图片像素，就会静音并把数码管最高位点亮成 F。
-    $mus = @()
-    $pos = 0
-    while ($true) {
-        $p = [Array]::IndexOf($img, [byte]0x52, $pos)      # 'R'，native 扫描
-        if ($p -lt 0 -or $p -ge ($img.Length - 44)) { break }
-        $pos = $p + 1
-        if (($p % $SEC) -ne 0) { continue }                # 必须在扇区边界
-        if ($img[$p+1] -ne 0x49 -or $img[$p+2] -ne 0x46 -or $img[$p+3] -ne 0x46) { continue }
-        if ([Text.Encoding]::ASCII.GetString($img, $p + 8, 4) -ne 'WAVE') { continue }
-        $dsz = [BitConverter]::ToUInt32($img, $p + 40)
-        $mus += [pscustomobject]@{ Pos = $p; Bytes = $dsz }
-    }
-    Log ("music slots in image: {0}" -f $mus.Count)
+    # ---------- 3. music directory (sector 1024) ----------
+    #  RTL 不再写死音乐区扇区：它读扇区 1024 的目录（"MDIR" + 每首的 base/扇区数）。
+    #  所以这里只要核对两件事：镜像里有目录、卡上同一位置字节一致。
+    #  卡上目录若是空的（旧镜像），RTL 会静音并把数码管最高位点亮成 F。
+    $DIR_SEC = 1024
+    $dpos = $DIR_SEC * $SEC
+    $imgTag = [Text.Encoding]::ASCII.GetString($img, $dpos, 4)
+    $cardTag = [Text.Encoding]::ASCII.GetString($buf, $dpos, 4)
     $musBad = 0
-    for ($i = 0; $i -lt $mus.Count; $i++) {
-        $m = $mus[$i]
-        $tag = [Text.Encoding]::ASCII.GetString($buf, $m.Pos, 4)
-        $ok  = ($tag -eq 'RIFF')
-        if (-not $ok) { $musBad++ }
-        Log ("  [M{0}] @sector {1,-6} card='{2}'  {3:N1} s  {4}" -f `
-              ($i + 1), ($m.Pos / $SEC), $tag, ($m.Bytes / 2.0 / 48000),
-              $(if ($ok) { 'OK' } else { 'BAD - RTL 会静音并显示 F' }))
-    }
-    if ($mus.Count -eq 0) {
-        Log "  (image has no RIFF slot -- run tools/make_sd_image.py first)"
+    if ($imgTag -ne 'MDIR') {
+        Log ("music dir  : image has NO directory at sector {0} (tag='{1}') -- run make_sd_image.py" -f $DIR_SEC, $imgTag)
+        $musBad++
+    } else {
+        $cnt = $img[$dpos + 4]
+        Log ("music dir  : sector {0}, {1} track(s), card tag='{2}' {3}" -f `
+              $DIR_SEC, $cnt, $cardTag, $(if ($cardTag -eq 'MDIR') { '[OK]' } else { '[BAD - RTL 会静音并显示 F]' }))
+        if ($cardTag -ne 'MDIR') { $musBad++ }
+        for ($i = 0; $i -lt $cnt; $i++) {
+            $o = $dpos + 8 + 8 * $i
+            $base = [BitConverter]::ToUInt32($img, $o)
+            $nsec = [BitConverter]::ToUInt32($img, $o + 4)
+            $same = ($null -ne $buf) -and ($buf[$dpos + 8 + 8 * $i] -eq $img[$dpos + 8 + 8 * $i])
+            Log ("  [T{0}] @sector {1,-6} {2,6} sectors  {3:N1} s  {4}" -f `
+                  ($i + 1), $base, $nsec, ($nsec * 512 / 2.0 / 48000),
+                  $(if ($base -ge $SEC -and ($base + $nsec) * $SEC -le $img.Length) { 'range OK' } else { 'RANGE BAD' }))
+        }
     }
 
     # ---------- verdict ----------
     if ($hashOk -and $slotBad -eq 0 -and $musBad -eq 0) {
-        Log "RESULT: OK - card identical to image; $($slots.Count) images + $($mus.Count) music slots valid"
+        Log "RESULT: OK - card identical to image; $($slots.Count) images + music dir valid"
     } elseif ($slotBad -ne 0) {
         Log "RESULT: FAIL - $slotBad slot(s) bad on card"
     } else {
