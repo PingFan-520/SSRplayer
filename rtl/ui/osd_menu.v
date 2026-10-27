@@ -1,10 +1,15 @@
 // ============================================================================
-//  osd_menu.v —— 调试菜单：全屏半透明遮罩 + 居中面板 + 6 项参数
+//  osd_menu.v —— 调试菜单：全屏半透明遮罩 + 居中面板
+//
+//  三页：
+//    page 0  设置页   [IMG] 亮度 对比度 缩放模式 音量 VU SUB
+//    page 1  音乐列表 OFF / GEN / T1..Tn（KEY3 从非菜单态直接进）
+//    page 2  图片子菜单 AUT（轮播开关）/ 切屏效果（FADE/SLIDE/WIPE/CUT）
 //
 //  纯像素域、纯坐标实时生成：不读帧缓存、不占 SDRAM 带宽。
 //  四级流水（区域 -> 地址 -> 字模 -> 合成），输出比输入 x/y 晚 3 个像素。
 //
-//  按键：key_menu 开合，key_up/key_down 选择，key_ok 改值
+//  按键：KEY4 开/关（任何页都直接关），KEY1/KEY2 上下，KEY3 确认/改值
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -15,7 +20,7 @@ module osd_menu #(
     parameter integer PY0 = 110,
     parameter integer PW  = 560,
     parameter integer PH  = 500,
-    parameter integer MUS_NUM = 4     // SD 曲目数（菜单 MUS 项：0=关 1=内置 2..1+N=曲目）
+    parameter integer MUS_NUM = 4     // 兼容保留（实际曲目数由 mus_total 给）
 )(
     input  wire        clk,
     input  wire        rst,
@@ -27,6 +32,11 @@ module osd_menu #(
     input  wire        key_up,
     input  wire        key_down,
     input  wire        key_ok,
+
+    // ---- FAT 扫描结果（曲目数 / 当前曲目名 / 无图片告警）----
+    input  wire [3:0]  mus_total,
+    input  wire [63:0] mus_name,
+    input  wire        alert,
 
     output reg         osd_on,
     output reg  [23:0] osd_rgb,
@@ -47,7 +57,10 @@ module osd_menu #(
     output wire        nav_prev,    // 非菜单态下 KEY2：上一张
     output wire        page_mus,    // 当前是否停在音乐列表页（调试用）
     output reg  [3:0]  cfg_vol,
-    output reg         cfg_meter     // 1 = 显示音频电平表
+    output reg         cfg_meter,    // 1 = 显示音频电平表（频谱）
+    output reg         cfg_sub,      // 1 = 显示底部滚动字幕
+    output reg  [2:0]  cfg_hold,     // 切屏间隔档位 0..4 -> 3/5/8/15/30 秒
+    output reg         cfg_style     // 0 = 底部条形  1 = 圆形中央
 );
 
     // ------------------------------------------------------------------
@@ -66,7 +79,7 @@ module osd_menu #(
     // 菜单状态
     // ------------------------------------------------------------------
     reg        open;
-    reg        page;               // 0=设置菜单 1=音乐列表
+    reg [1:0]  page;               // 0=设置页 1=音乐列表 2=图片子菜单
     reg [2:0]  item;
     reg [1:0]  v_trans;
     reg [3:0]  v_bright;
@@ -75,72 +88,103 @@ module osd_menu #(
     reg [2:0]  v_mus;
     reg [3:0]  v_vol;
     reg        v_meter;
-    reg        v_auto;             // 轮播开关（默认开）
+    reg        v_sub;              // 字幕开关（与频谱互不影响）
+    reg        v_auto;             // 轮播开关（默认关：上电不自动转场）
+    reg [2:0]  v_hold;             // 切屏间隔 0..4（3/5/8/15/30 秒）
+    reg        v_style;            // 0=底部条形 1=圆形中央
 
-    // 当前光标项的取值
-    wire [3:0] cur_val = (item == 3'd0) ? {2'b00, v_trans}   :
+    // 当前光标项的取值（只用于数码管/调试观测）
+    wire [3:0] cur_val = (page == 2'd1) ? {1'b0, v_mus} :
+                         (page == 2'd2) ? ((item == 3'd0) ? {3'b000, v_auto}    :
+                                           (item == 3'd1) ? {2'b00, v_trans}   :
+                                                            {1'b0, v_hold})    :
+                         (page == 2'd3) ? ((item == 3'd0) ? {3'b000, v_meter}
+                                                          : {3'b000, v_style}) :
                          (item == 3'd1) ? v_bright            :
                          (item == 3'd2) ? v_contrast          :
                          (item == 3'd3) ? {2'b00, v_scale}    :
-                         (item == 3'd4) ? {3'b000, v_auto}    :
-                         (item == 3'd5) ? v_vol               :
-                                          {3'b000, v_meter};
+                         (item == 3'd4) ? v_vol               :
+                         (item == 3'd5) ? {3'b000, v_meter}   :
+                         (item == 3'd6) ? {3'b000, v_sub}     : 4'd0;
 
     assign menu_open = open;
     assign dbg_item  = item;
     assign dbg_val   = cur_val;
 
     // 面板当前页的最大行号
-    wire [2:0] row_max = page ? (MUS_NUM[2:0] + 3'd1) : 3'd6;
+    wire [2:0] row_max = (page == 2'd1) ? ({1'b0, mus_total} + 3'd1) :
+                         (page == 2'd2) ? 3'd2 :
+                         (page == 2'd3) ? 3'd1 : 3'd6;
 
     // 非菜单态下，KEY1/KEY2 直接切图（给上层用）
     assign nav_next = ~open & key_down;
     assign nav_prev = ~open & key_up;
-    assign page_mus = open & page;
+    assign page_mus = open & (page == 2'd1);
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             open       <= 1'b0;
-            page       <= 1'b0;
+            page       <= 2'd0;
             item       <= 3'd0;
             v_trans    <= 2'd0;
             v_bright   <= 4'd10;
             v_contrast <= 4'd10;
             v_scale    <= 2'd0;
-            v_mus      <= 3'd1;      // 默认：内置音阶
+            v_mus      <= 3'd0;      // 默认：OFF（上电不自动放内置音乐）
             v_vol      <= 4'd6;
-            v_meter    <= 1'b1;
-            v_auto     <= 1'b1;      // 默认：自动轮播
+            v_meter    <= 1'b0;      // 默认：频谱关
+            v_sub      <= 1'b1;      // 默认：字幕开
+            v_auto     <= 1'b0;      // 默认：不自动轮播（上电不转场）
+            v_hold     <= 3'd1;      // 默认：5 秒
+            v_style    <= 1'b0;      // 默认：底部条形
         end else begin
-            // ---- KEY4(MENU)：开/关"设置"页 ----
+            // ---- KEY4(MENU)：开/关。任何页都直接关闭（一次按键退出）----
             if (key_menu) begin
                 if (open) begin
-                    open <= 1'b0;                 // 任何页都：KEY4 = 关闭
+                    open <= 1'b0;
                 end else begin
                     open <= 1'b1;
-                    page <= 1'b0;
+                    page <= 2'd0;                // 每次打开都回到设置页首项
                     item <= 3'd0;
                 end
             end
 
-            // ---- KEY3(OK)：非菜单态打开音乐列表；音乐页里确认；设置页里改值 ----
+            // ---- KEY3(OK)：非菜单态打开音乐列表；音乐页里确认；
+            //      设置页里改值/进子菜单；子菜单里改值 ----
             if (key_ok) begin
                 if (!open) begin
                     open <= 1'b1;
-                    page <= 1'b1;
-                    item <= v_mus;                // 光标停在当前曲目上
-                end else if (page) begin
+                    page <= 2'd1;
+                    // 光标停在当前曲目上；卡换了/曲目变少时夹回列表内
+                    item <= ({1'b0, v_mus} > ({1'b0, mus_total} + 4'd1))
+                            ? 3'd0 : v_mus;
+                end else if (page == 2'd1) begin
                     v_mus <= item;                // 0=OFF 1=GEN 2..=T1..
                     open  <= 1'b0;                // 选完自动关闭
+                end else if (page == 2'd2) begin
+                    if (item == 3'd0)      v_auto  <= ~v_auto;             // 轮播开关
+                    else if (item == 3'd1) v_trans <= (v_trans == 2'd3) ? 2'd0
+                                                                       : v_trans + 2'd1;
+                    else                   v_hold  <= (v_hold == 3'd4) ? 3'd0
+                                                                       : v_hold + 3'd1;
+                end else if (page == 2'd3) begin
+                    if (item == 3'd0) v_meter <= ~v_meter;                 // 频谱开关
+                    else              v_style <= ~v_style;                 // 条形 / 圆形
                 end else begin
                     case (item)
-                        3'd0: v_trans    <= (v_trans == 2'd3) ? 2'd0 : v_trans + 2'd1;
+                        3'd0: begin                  // 进入图片子菜单
+                            page <= 2'd2;
+                            item <= 3'd0;
+                        end
                         3'd1: v_bright   <= (v_bright >= 4'd10) ? 4'd0 : v_bright + 4'd1;
                         3'd2: v_contrast <= (v_contrast >= 4'd10) ? 4'd0 : v_contrast + 4'd1;
                         3'd3: v_scale    <= (v_scale == 2'd2) ? 2'd0 : v_scale + 2'd1;
-                        3'd4: v_auto     <= ~v_auto;              // 轮播开关
-                        3'd5: v_vol      <= (v_vol >= 4'd10) ? 4'd0 : v_vol + 4'd1;
-                        default: v_meter <= ~v_meter;
+                        3'd4: v_vol      <= (v_vol >= 4'd10) ? 4'd0 : v_vol + 4'd1;
+                        3'd5: begin                              // 进 VU 子菜单
+                            page <= 2'd3;
+                            item <= 3'd0;
+                        end
+                        default: v_sub   <= ~v_sub;               // 字幕开关
                     endcase
                 end
             end
@@ -165,6 +209,9 @@ module osd_menu #(
         cfg_auto     <= v_auto;
         cfg_vol      <= v_vol;
         cfg_meter    <= v_meter;
+        cfg_sub      <= v_sub;
+        cfg_hold     <= v_hold;
+        cfg_style    <= v_style;
     end
 
     reg [11:0] y_d;
@@ -174,29 +221,72 @@ module osd_menu #(
     // ------------------------------------------------------------------
     // 几何区域
     // ------------------------------------------------------------------
-    wire in_panel  = (x >= PX0) && (x < PX0 + PW) && (y >= PY0) && (y < PY0 + PH);
+    wire frame_start = (x == 12'd0) && (y == 12'd0);
+
+    // ------------------------------------------------------------------
+    // 渲染快照：面板尺寸/行号/高亮都跟着页走，如果按键正好落在帧中间，
+    // 同一帧上半张用一个 r_page、下半张用另一个 r_page，会撕成两半面板。
+    // 这里把"要显示的状态"在帧首统一打一拍，整帧用同一份。
+    // ------------------------------------------------------------------
+    reg        r_open;
+    reg [1:0]  r_page;
+    reg [2:0]  r_item;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            r_open <= 1'b0;
+            r_page <= 2'd0;
+            r_item <= 3'd0;
+        end else if (frame_start) begin
+            r_open <= open;
+            r_page <= page;
+            r_item <= item;
+        end
+    end
+
+    // 面板高度按页变化（都垂直居中）：
+    //   设置页 7 行      -> 596
+    //   音乐列表最多 8 行 -> 660
+    //   图片子菜单 2 行   -> 260（不留大片空白）
+    wire [11:0] py0_cur = (r_page == 2'd2) ? 12'd192 :   // IMG：3 行
+                          (r_page == 2'd3) ? 12'd230 :   // VU ：2 行
+                          (r_page == 2'd1) ? 12'd30  : 12'd62;
+    wire [11:0] ph_cur  = (r_page == 2'd2) ? 12'd336 :
+                          (r_page == 2'd3) ? 12'd260 :
+                          (r_page == 2'd1) ? 12'd660 : 12'd596;
+
+    wire in_panel  = (x >= PX0) && (x < PX0 + PW) && (y >= py0_cur) && (y < py0_cur + ph_cur);
     wire [11:0] rx = x - PX0;
-    wire [11:0] ry = y - PY0;
+    wire [11:0] ry = y - py0_cur;
 
     wire in_border = in_panel &&
-                     ((rx < 12'd2) || (rx >= PW - 2) || (ry < 12'd2) || (ry >= PH - 2));
+                     ((rx < 12'd2) || (rx >= PW - 2) || (ry < 12'd2) || (ry >= ph_cur - 2));
 
-    wire row_band  = in_panel && (ry >= 12'd80) && (ry < 12'd528);
+    // 行区：音乐页 8 行、设置页 7 行、二级页 2 行（别压到底部提示行）
+    wire [11:0] row_end = (r_page == 2'd2) ? 12'd272 :
+                          (r_page == 2'd3) ? 12'd208 :
+                          (r_page == 2'd1) ? 12'd592 : 12'd528;
+    wire row_band  = in_panel && (ry >= 12'd80) && (ry < row_end);
     wire [2:0] ridx = (ry - 12'd80) >> 6;
     wire [11:0] wy  = ry - 12'd80 - {ridx, 6'b000000};
     wire row_tv     = (wy >= 12'd12) && (wy < 12'd44);
     wire [3:0] row_fr = (wy - 12'd12) >> 1;
 
     // 每一行自己的取值
-    wire [3:0] row_val = (ridx == 3'd0) ? {2'b00, v_trans}   :
+    wire [3:0] row_val = (r_page == 2'd1) ? {1'b0, v_mus} :
+                         (r_page == 2'd2) ? ((ridx == 3'd0) ? {3'b000, v_auto}  :
+                                             (ridx == 3'd1) ? {2'b00, v_trans} :
+                                                              {1'b0, v_hold})  :
+                         (r_page == 2'd3) ? ((ridx == 3'd0) ? {3'b000, v_meter}
+                                                            : {3'b000, v_style}) :
                          (ridx == 3'd1) ? v_bright            :
                          (ridx == 3'd2) ? v_contrast          :
                          (ridx == 3'd3) ? {2'b00, v_scale}    :
-                         (ridx == 3'd4) ? {3'b000, v_auto}    :
-                         (ridx == 3'd5) ? v_vol               :
-                                          {3'b000, v_meter};
+                         (ridx == 3'd4) ? v_vol               :
+                         (ridx == 3'd5) ? {3'b000, v_meter}   :
+                         (ridx == 3'd6) ? {3'b000, v_sub}     : 4'd0;
 
-    wire title_hv = (x >= PX0 + 32) && (x < PX0 + 160) && (y >= PY0 + 24) && (y < PY0 + 56);
+    wire title_hv = (x >= PX0 + 32) && (x < PX0 + 160) && (y >= py0_cur + 24) && (y < py0_cur + 56);
     wire [11:0] tcx = x - (PX0 + 32);
 
     wire label_hv = (x >= PX0 + 32) && (x < PX0 + 160) && row_band && row_tv;
@@ -206,53 +296,108 @@ module osd_menu #(
     wire [11:0] vcx = x - (PX0 + 300);
 
     wire hint_hv  = (x >= PX0 + 32) && (x < PX0 + 320) &&
-                    (y >= PY0 + PH - 28) && (y < PY0 + PH - 12);
+                    (y >= py0_cur + ph_cur - 28) && (y < py0_cur + ph_cur - 12);
     wire [11:0] hcx = x - (PX0 + 32);
 
     // ---- 底部滚动字幕条 ----
     reg [11:0] scroll;
-    wire frame_start = (x == 12'd0) && (y == 12'd0);
+
+    // 字幕按 64 字（2048px）循环：和字模索引 sub_tx[10:5] 的取模周期一致，
+    // 回卷时画面完全连续，不会跳字。
+    localparam [11:0] SUB_LEN = 12'd2048;
 
     always @(posedge clk or posedge rst) begin
         if (rst)
             scroll <= 12'd0;
         else if (frame_start) begin
-            if (scroll >= 12'd2304)
+            if (scroll >= SUB_LEN)
                 scroll <= 12'd0;
             else
                 scroll <= scroll + 12'd3;
         end
     end
 
-    wire        sub_bar = (y >= VACTIVE - 104) && (y < VACTIVE - 40);
+    // 字幕条固定在 y 592..640（音频条 468..579 下方，留 13 行空隙），
+    // 整条与频谱完全分离：两个开关任意组合都不会互相遮挡。
+    wire        sub_bar = (y >= 12'd592) && (y < 12'd640);
     wire [13:0] sub_x   = {2'b00, x} + {2'b00, scroll};
     wire [13:0] sub_tx  = sub_x - 14'd24;
-    wire        sub_tv  = (y >= VACTIVE - 96) && (y < VACTIVE - 64);
-    wire        sub_hv  = sub_tv && (sub_tx < 14'd1024);
+    wire        sub_tv  = (y >= 12'd600) && (y < 12'd632);     // 32 行字高
+    wire        sub_hv  = sub_tv;      // 索引按 64 字取模，越界自然落在空格上
+
+    // 没有可用图片时在底部条上显示 "NO IMAGE"（居中，8 字 x 32px）
+    wire        alert_hv = (y >= 12'd600) && (y < 12'd632) &&
+                           (x >= 12'd512) && (x < 12'd768);
+
+    function [5:0] g_msg;
+        input [2:0] i;
+        begin
+            case (i)
+                3'd0: g_msg = 6'd13;   // N
+                3'd1: g_msg = 6'd14;   // O
+                3'd2: g_msg = 6'd37;   //
+                3'd3: g_msg = 6'd8;    // I
+                3'd4: g_msg = 6'd12;   // M
+                3'd5: g_msg = 6'd0;    // A
+                3'd6: g_msg = 6'd6;    // G
+                default: g_msg = 6'd4; // E
+            endcase
+        end
+    endfunction
 
     // ------------------------------------------------------------------
     // 字模索引
     // ------------------------------------------------------------------
     function [5:0] g_title;
-        input       pg;
+        input [1:0] pg;                  // 0=设置 1=音乐 2=图片子菜单
         input [1:0] i;
         begin
-            case (i)
-                2'd0: g_title = pg ? 6'd12 : 6'd42;   // 音乐页: M；设置页: 调
-                2'd1: g_title = pg ? 6'd20 : 6'd43;   // U / 试
-                2'd2: g_title = pg ? 6'd18 : 6'd44;   // S / 菜
-                default: g_title = pg ? 6'd37 : 6'd45; // 空 / 单
+            case (pg)
+                2'd1: case (i)               // MUS
+                    2'd0: g_title = 6'd12;   // M
+                    2'd1: g_title = 6'd20;   // U
+                    2'd2: g_title = 6'd18;   // S
+                    default: g_title = 6'd37;
+                endcase
+                2'd2: case (i)               // IMG
+                    2'd0: g_title = 6'd8;    // I
+                    2'd1: g_title = 6'd12;   // M
+                    2'd2: g_title = 6'd6;    // G
+                    default: g_title = 6'd37;
+                endcase
+                2'd3: case (i)               // VU
+                    2'd0: g_title = 6'd21;   // V
+                    2'd1: g_title = 6'd20;   // U
+                    default: g_title = 6'd37;
+                endcase
+                default: case (i)            // 调试菜单
+                    2'd0: g_title = 6'd42;   // 调
+                    2'd1: g_title = 6'd43;   // 试
+                    2'd2: g_title = 6'd44;   // 菜
+                    default: g_title = 6'd45; // 单
+                endcase
             endcase
         end
     endfunction
 
+    function [7:0] asc2g;                 // ASCII -> 字模编号
+        input [7:0] c;
+        begin
+            if ((c >= "A") && (c <= "Z"))      asc2g = 8'd0  + (c - "A");
+            else if ((c >= "a") && (c <= "z")) asc2g = 8'd0  + (c - "a");
+            else if ((c >= "0") && (c <= "9")) asc2g = 8'd26 + (c - "0");
+            else                               asc2g = 8'd37;
+        end
+    endfunction
+
     function [5:0] g_label;
-        input       pg;                  // 0=设置页 1=音乐列表
+        input [1:0] pg;                  // 0=设置 1=音乐列表 2=图片子菜单
         input [2:0] it;
         input [1:0] i;
+        input [2:0] total;
         begin
             g_label = 6'd37;             // 空格
-            if (pg) begin
+            if (pg == 2'd1) begin
                 // ---- 音乐列表：OFF / GEN / T1..TN ----
                 case (it)
                     3'd0: case (i)
@@ -267,74 +412,118 @@ module osd_menu #(
                         2'd2: g_label = 6'd13;   // N
                         default: g_label = 6'd37;
                     endcase
-                    default: case (i)
-                        2'd0: g_label = 6'd19;   // T
-                        // 字形 27='1' 28='2' 29='3' 30='4'；行号 it=2 对应 T1，
-                        // 所以基址是 25（写成 26 会整体偏一位，列表显示成 T2/T3）
-                        2'd1: g_label = (it >= 3'd2 && it < (MUS_NUM[2:0] + 3'd2))
-                                       ? (6'd25 + it) : 6'd37;
+                    default: begin
+                        // 只有真实存在的曲目才显示 Tn；空行整个留白
+                        // （字形 27='1' 28='2'…；行号 it=2 对应 T1，基址 25）
+                        if ((it >= 3'd2) && (it < (total + 3'd2))) begin
+                            case (i)
+                                2'd0: g_label = 6'd19;        // T
+                                2'd1: g_label = 6'd25 + it;   // 数字
+                                default: g_label = 6'd37;
+                            endcase
+                        end
+                    end
+                endcase
+            end else if (pg == 2'd2) begin
+                // ---- 图片子菜单：AUT / 切屏效果 ----
+                if (it == 3'd0) begin
+                    case (i)
+                        2'd0: g_label = 6'd0;    // A
+                        2'd1: g_label = 6'd20;   // U
+                        2'd2: g_label = 6'd19;   // T
                         default: g_label = 6'd37;
                     endcase
-                endcase
-            end else
-            case (it)
-                3'd0: case (i)
-                    2'd0: g_label = 6'd46;   // 切
-                    2'd1: g_label = 6'd47;   // 屏
-                    2'd2: g_label = 6'd48;   // 效
-                    default: g_label = 6'd49; // 果
-                endcase
-                3'd1: case (i)
-                    2'd0: g_label = 6'd50;   // 亮
-                    2'd1: g_label = 6'd51;   // 度
+                end else if (it == 3'd1) begin
+                    case (i)
+                        2'd0: g_label = 6'd46;   // 切
+                        2'd1: g_label = 6'd47;   // 屏
+                        2'd2: g_label = 6'd48;   // 效
+                        default: g_label = 6'd49; // 果
+                    endcase
+                end else if (it == 3'd2) begin
+                    case (i)                     // INT（切屏间隔）
+                        2'd0: g_label = 6'd8;    // I
+                        2'd1: g_label = 6'd13;   // N
+                        2'd2: g_label = 6'd19;   // T
+                        default: g_label = 6'd37;
+                    endcase
+                end
+            end else if (pg == 2'd3) begin
+                // ---- 音频可视化子菜单：VU / MODE ----
+                if (it == 3'd0) begin
+                    case (i)
+                        2'd0: g_label = 6'd21;   // V
+                        2'd1: g_label = 6'd20;   // U
+                        default: g_label = 6'd37;
+                    endcase
+                end else if (it == 3'd1) begin
+                    case (i)                     // MODE
+                        2'd0: g_label = 6'd12;   // M
+                        2'd1: g_label = 6'd14;   // O
+                        2'd2: g_label = 6'd3;    // D
+                        default: g_label = 6'd4; // E
+                    endcase
+                end
+            end else begin
+                // ---- 设置页 ----
+                case (it)
+                    3'd0: case (i)               // IMG（进子菜单）
+                        2'd0: g_label = 6'd8;    // I
+                        2'd1: g_label = 6'd12;   // M
+                        2'd2: g_label = 6'd6;    // G
+                        default: g_label = 6'd37;
+                    endcase
+                    3'd1: case (i)
+                        2'd0: g_label = 6'd50;   // 亮
+                        2'd1: g_label = 6'd51;   // 度
+                        default: g_label = 6'd37;
+                    endcase
+                    3'd2: case (i)
+                        2'd0: g_label = 6'd52;   // 对
+                        2'd1: g_label = 6'd53;   // 比
+                        2'd2: g_label = 6'd51;   // 度
+                        default: g_label = 6'd37;
+                    endcase
+                    3'd3: case (i)
+                        2'd0: g_label = 6'd54;   // 缩
+                        2'd1: g_label = 6'd55;   // 放
+                        2'd2: g_label = 6'd56;   // 模
+                        default: g_label = 6'd57; // 式
+                    endcase
+                    3'd4: case (i)
+                        2'd0: g_label = 6'd60;   // 音
+                        2'd1: g_label = 6'd61;   // 量
+                        default: g_label = 6'd37;
+                    endcase
+                    3'd5: case (i)               // VU（电平表开关）
+                        2'd0: g_label = 6'd21;   // V
+                        2'd1: g_label = 6'd20;   // U
+                        default: g_label = 6'd37;
+                    endcase
+                    3'd6: case (i)               // SUB（字幕开关）
+                        2'd0: g_label = 6'd18;   // S
+                        2'd1: g_label = 6'd20;   // U
+                        2'd2: g_label = 6'd1;    // B
+                        default: g_label = 6'd37;
+                    endcase
                     default: g_label = 6'd37;
                 endcase
-                3'd2: case (i)
-                    2'd0: g_label = 6'd52;   // 对
-                    2'd1: g_label = 6'd53;   // 比
-                    2'd2: g_label = 6'd51;   // 度
-                    default: g_label = 6'd37;
-                endcase
-                3'd3: case (i)
-                    2'd0: g_label = 6'd54;   // 缩
-                    2'd1: g_label = 6'd55;   // 放
-                    2'd2: g_label = 6'd56;   // 模
-                    default: g_label = 6'd57; // 式
-                endcase
-                3'd4: case (i)               // AUT（自动轮播开关）
-                    2'd0: g_label = 6'd0;    // A
-                    2'd1: g_label = 6'd20;   // U
-                    2'd2: g_label = 6'd19;   // T
-                    default: g_label = 6'd37;
-                endcase
-                3'd5: case (i)
-                    2'd0: g_label = 6'd60;   // 音
-                    2'd1: g_label = 6'd61;   // 量
-                    default: g_label = 6'd37;
-                endcase
-                3'd6: case (i)               // VU（电平表开关）
-                    2'd0: g_label = 6'd21;   // V
-                    2'd1: g_label = 6'd20;   // U
-                    default: g_label = 6'd37;
-                endcase
-                default: case (i)
-                    default: g_label = 6'd37;
-                endcase
-            endcase
+            end
         end
     endfunction
 
     function [5:0] g_hint;
+        input       sub;                 // 1 = 子菜单页：OK 改值（不是 NEXT）
         input [4:0] i;
         begin
             case (i)
                 5'd0:  g_hint = 6'd14;   // O
                 5'd1:  g_hint = 6'd10;   // K
                 5'd2:  g_hint = 6'd37;
-                5'd3:  g_hint = 6'd13;   // N
-                5'd4:  g_hint = 6'd4;    // E
-                5'd5:  g_hint = 6'd23;   // X
-                5'd6:  g_hint = 6'd19;   // T
+                5'd3:  g_hint = sub ? 6'd18 : 6'd13;   // S / N
+                5'd4:  g_hint = 6'd4;                  // E
+                5'd5:  g_hint = sub ? 6'd19 : 6'd23;   // T / X
+                5'd6:  g_hint = sub ? 6'd37 : 6'd19;   // 空 / T
                 5'd7:  g_hint = 6'd37;
                 5'd8:  g_hint = 6'd37;
                 5'd9:  g_hint = 6'd12;   // M
@@ -350,62 +539,105 @@ module osd_menu #(
         end
     endfunction
 
-    // 字幕文案： "NOW PLAYING 01/12  MUSIC FRAME   "
+    // 字幕文案： "NOW PLAYING <8字节歌名>  MUSIC FRAME"（共 40 字，循环滚动）
+    //   12..19 显示 FAT 目录里的 8.3 名字；0x00 当空格
+    // 字幕文案：
+    //   play=0（音乐 OFF）："MUSIC PHOTO FRAME"（17 字）
+    //   play=1           ："NOW PLAYING <8字节歌名>  MUSIC FRAME"（33 字）
+    //   0x00 当空格
+    // 字幕文案（按 64 字周期滚动，索引 0..63）：
+    //   play=0（音乐 OFF）："MUSIC PHOTO FRAME"（17 字）
+    //   play=1           ："NOW PLAYING <8字节歌名> MUSIC FRAME"（正好 32 字）
+    //   0x00 当空格
     function [5:0] g_sub;
-        input [4:0] i;
+        input [5:0]  i;
+        input [63:0] nm;
+        input        play;
         begin
-            case (i)
-                5'd0:  g_sub = 6'd13;  // N
-                5'd1:  g_sub = 6'd14;  // O
-                5'd2:  g_sub = 6'd22;  // W
-                5'd3:  g_sub = 6'd37;  //
-                5'd4:  g_sub = 6'd15;  // P
-                5'd5:  g_sub = 6'd11;  // L
-                5'd6:  g_sub = 6'd0;   // A
-                5'd7:  g_sub = 6'd24;  // Y
-                5'd8:  g_sub = 6'd8;   // I
-                5'd9:  g_sub = 6'd13;  // N
-                5'd10: g_sub = 6'd6;   // G
-                5'd11: g_sub = 6'd37;
-                5'd12: g_sub = 6'd26;  // 0
-                5'd13: g_sub = 6'd27;  // 1
-                5'd14: g_sub = 6'd38;  // /
-                5'd15: g_sub = 6'd27;  // 1
-                5'd16: g_sub = 6'd28;  // 2
-                5'd17: g_sub = 6'd37;
-                5'd18: g_sub = 6'd37;
-                5'd19: g_sub = 6'd12;  // M
-                5'd20: g_sub = 6'd20;  // U
-                5'd21: g_sub = 6'd18;  // S
-                5'd22: g_sub = 6'd8;   // I
-                5'd23: g_sub = 6'd2;   // C
-                5'd24: g_sub = 6'd37;
-                5'd25: g_sub = 6'd5;   // F
-                5'd26: g_sub = 6'd17;  // R
-                5'd27: g_sub = 6'd0;   // A
-                5'd28: g_sub = 6'd12;  // M
-                5'd29: g_sub = 6'd4;   // E
-                default: g_sub = 6'd37;
-            endcase
+            if (!play) begin
+                case (i)
+                    6'd0:  g_sub = 6'd12;  // M
+                    6'd1:  g_sub = 6'd20;  // U
+                    6'd2:  g_sub = 6'd18;  // S
+                    6'd3:  g_sub = 6'd8;   // I
+                    6'd4:  g_sub = 6'd2;   // C
+                    6'd5:  g_sub = 6'd37;
+                    6'd6:  g_sub = 6'd15;  // P
+                    6'd7:  g_sub = 6'd7;   // H
+                    6'd8:  g_sub = 6'd14;  // O
+                    6'd9:  g_sub = 6'd19;  // T
+                    6'd10: g_sub = 6'd14;  // O
+                    6'd11: g_sub = 6'd37;
+                    6'd12: g_sub = 6'd5;   // F
+                    6'd13: g_sub = 6'd17;  // R
+                    6'd14: g_sub = 6'd0;   // A
+                    6'd15: g_sub = 6'd12;  // M
+                    6'd16: g_sub = 6'd4;   // E
+                    default: g_sub = 6'd37;
+                endcase
+            end else begin
+                case (i)
+                    6'd0:  g_sub = 6'd13;  // N
+                    6'd1:  g_sub = 6'd14;  // O
+                    6'd2:  g_sub = 6'd22;  // W
+                    6'd3:  g_sub = 6'd37;  //
+                    6'd4:  g_sub = 6'd15;  // P
+                    6'd5:  g_sub = 6'd11;  // L
+                    6'd6:  g_sub = 6'd0;   // A
+                    6'd7:  g_sub = 6'd24;  // Y
+                    6'd8:  g_sub = 6'd8;   // I
+                    6'd9:  g_sub = 6'd13;  // N
+                    6'd10: g_sub = 6'd6;   // G
+                    6'd11: g_sub = 6'd37;  //
+                    6'd12: g_sub = asc2g(nm[7:0]);
+                    6'd13: g_sub = asc2g(nm[15:8]);
+                    6'd14: g_sub = asc2g(nm[23:16]);
+                    6'd15: g_sub = asc2g(nm[31:24]);
+                    6'd16: g_sub = asc2g(nm[39:32]);
+                    6'd17: g_sub = asc2g(nm[47:40]);
+                    6'd18: g_sub = asc2g(nm[55:48]);
+                    6'd19: g_sub = asc2g(nm[63:56]);
+                    6'd20: g_sub = 6'd37;
+                    6'd21: g_sub = 6'd12;  // M
+                    6'd22: g_sub = 6'd20;  // U
+                    6'd23: g_sub = 6'd18;  // S
+                    6'd24: g_sub = 6'd8;   // I
+                    6'd25: g_sub = 6'd2;   // C
+                    6'd26: g_sub = 6'd37;
+                    6'd27: g_sub = 6'd5;   // F
+                    6'd28: g_sub = 6'd17;  // R
+                    6'd29: g_sub = 6'd0;   // A
+                    6'd30: g_sub = 6'd12;  // M
+                    6'd31: g_sub = 6'd4;   // E
+                    default: g_sub = 6'd37;
+                endcase
+            end
         end
     endfunction
 
     function [5:0] g_val;
-        input       pg;
+        input [1:0] pg;
         input [2:0] it;
         input [2:0] i;
         input [3:0] v;
+        input [2:0] total;
         begin
             g_val = 6'd37;
-            if (pg) begin
+            if (pg == 2'd1) begin
                 // 音乐列表：当前播放的那一行标一个 '>'
                 case (i)
                     3'd0: g_val = (it == v[2:0]) ? 6'd40 : 6'd37;
                     default: g_val = 6'd37;
                 endcase
-            end else
-            case (it)
-                3'd0: begin                       // FADE / SLIDE / WIPE / CUT
+            end else if (pg == 2'd2) begin
+                if (it == 3'd0) begin            // AUT：ON / OFF
+                    case (i)
+                        3'd0: g_val = 6'd14;                       // O
+                        3'd1: g_val = v[0] ? 6'd13 : 6'd5;         // N / F
+                        3'd2: g_val = v[0] ? 6'd37 : 6'd5;         // - / F
+                        default: g_val = 6'd37;
+                    endcase
+                end else if (it == 3'd1) begin   // 切屏效果
                     case (i)
                         3'd0: g_val = (v == 4'd0) ? 6'd5 : (v == 4'd1) ? 6'd18 : (v == 4'd2) ? 6'd22 : 6'd2;
                         3'd1: g_val = (v == 4'd0) ? 6'd0 : (v == 4'd1) ? 6'd11 : (v == 4'd2) ? 6'd8  : 6'd20;
@@ -414,7 +646,61 @@ module osd_menu #(
                         3'd4: g_val = (v == 4'd1) ? 6'd4 : 6'd37;
                         default: g_val = 6'd37;
                     endcase
+                end else begin                   // INT：3S/5S/8S/15S/30S
+                    case (v[2:0])
+                        3'd0: begin                  // 3S
+                            case (i) 3'd0: g_val = 6'd29; default: g_val = (i == 3'd1) ? 6'd18 : 6'd37; endcase
+                        end
+                        3'd1: begin                  // 5S
+                            case (i) 3'd0: g_val = 6'd31; default: g_val = (i == 3'd1) ? 6'd18 : 6'd37; endcase
+                        end
+                        3'd2: begin                  // 8S
+                            case (i) 3'd0: g_val = 6'd34; default: g_val = (i == 3'd1) ? 6'd18 : 6'd37; endcase
+                        end
+                        3'd3: begin                  // 15S
+                            case (i)
+                                3'd0: g_val = 6'd27;   // 1
+                                3'd1: g_val = 6'd31;   // 5
+                                default: g_val = (i == 3'd2) ? 6'd18 : 6'd37;
+                            endcase
+                        end
+                        default: begin               // 30S
+                            case (i)
+                                3'd0: g_val = 6'd29;   // 3
+                                3'd1: g_val = 6'd26;   // 0
+                                default: g_val = (i == 3'd2) ? 6'd18 : 6'd37;
+                            endcase
+                        end
+                    endcase
                 end
+            end else if (pg == 2'd3) begin
+                if (it == 3'd0) begin            // VU：ON / OFF
+                    case (i)
+                        3'd0: g_val = 6'd14;
+                        3'd1: g_val = v[0] ? 6'd13 : 6'd5;
+                        3'd2: g_val = v[0] ? 6'd37 : 6'd5;
+                        default: g_val = 6'd37;
+                    endcase
+                end else begin                    // MODE：BAR / CIRC
+                    if (v[0] == 1'b0) begin
+                        case (i)                     // BAR
+                            3'd0: g_val = 6'd1;      // B
+                            3'd1: g_val = 6'd0;      // A
+                            3'd2: g_val = 6'd17;     // R
+                            default: g_val = 6'd37;
+                        endcase
+                    end else begin
+                        case (i)                     // CIRC
+                            3'd0: g_val = 6'd2;      // C
+                            3'd1: g_val = 6'd8;      // I
+                            3'd2: g_val = 6'd17;     // R
+                            default: g_val = (i == 3'd3) ? 6'd2 : 6'd37;
+                        endcase
+                    end
+                end
+            end else
+            case (it)
+                3'd0: g_val = (i == 3'd0) ? 6'd40 : 6'd37;   // '>'：表示可进入
                 3'd3: begin                       // FIT / FILL / STRETCH
                     case (i)
                         3'd0: g_val = (v == 4'd0) ? 6'd5  : (v == 4'd1) ? 6'd5  : 6'd18;
@@ -426,7 +712,7 @@ module osd_menu #(
                         default: g_val = (v == 4'd2) ? 6'd7 : 6'd37;
                     endcase
                 end
-                3'd4, 3'd6: begin                 // AUT / VU：ON / OFF
+                3'd5, 3'd6: begin                 // VU / SUB：ON / OFF
                     case (i)
                         3'd0: g_val = 6'd14;                       // O
                         3'd1: g_val = v[0] ? 6'd13 : 6'd5;         // N / F
@@ -434,7 +720,7 @@ module osd_menu #(
                         default: g_val = 6'd37;
                     endcase
                 end
-                default: begin                    // 百分比：0% / 80% / 100%
+                3'd1, 3'd2, 3'd4: begin           // 亮度 / 对比度 / 音量：百分比
                     if (v == 4'd10) begin
                         case (i)
                             3'd0: g_val = 6'd27;   // 1
@@ -458,6 +744,7 @@ module osd_menu #(
                         endcase
                     end
                 end
+                default: g_val = 6'd37;
             endcase
         end
     endfunction
@@ -483,15 +770,27 @@ module osd_menu #(
         s0_base_rgb   = 24'h00_00_00;
         s0_base_alpha = 4'd0;
 
+        // ---- 无图片告警条 ----
+        if (alert && sub_bar) begin
+            s0_base_rgb   = 24'h30_00_00;
+            s0_base_alpha = 4'd7;
+        end
+
+        // ---- 字幕条底色（菜单关着才显示）----
+        if (!r_open && v_sub && sub_bar) begin
+            s0_base_rgb   = 24'h00_00_00;
+            s0_base_alpha = 4'd4;                  // 25% 黑，文字清晰又不挡图
+        end
+
         // ---- 菜单底色 ----
-        if (open) begin
+        if (r_open) begin
             if (!in_panel) begin
                 s0_base_rgb   = C_MASK;
                 s0_base_alpha = 4'd3;              // 全屏 37.5% 黑遮罩
             end else if (in_border) begin
                 s0_base_rgb   = C_BORDER;
                 s0_base_alpha = 4'd8;
-            end else if (row_band && (ridx == item)) begin
+            end else if (row_band && (ridx == r_item)) begin
                 s0_base_rgb   = C_HLBG;
                 s0_base_alpha = 4'd8;
             end else begin
@@ -501,30 +800,42 @@ module osd_menu #(
         end
 
         // ---- 文本：菜单优先，其次字幕 ----
-        if (open && title_hv) begin
+        if (r_open && title_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_title(page, tcx[6:5]);
+            s0_glyph  = g_title(r_page, tcx[6:5]);
             s0_fcol   = tcx[4:1];
-            s0_frow   = (y - (PY0 + 24)) >> 1;
+            s0_frow   = (y - (py0_cur + 24)) >> 1;
             s0_tcolor = C_TITLE;
-        end else if (open && label_hv) begin
+        end else if (r_open && label_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_label(page, ridx, lcx[6:5]);
+            s0_glyph  = g_label(r_page, ridx, lcx[6:5], mus_total[2:0]);
             s0_fcol   = lcx[4:1];
             s0_frow   = row_fr;
             s0_tcolor = C_LABEL;
-        end else if (open && value_hv) begin
+        end else if (r_open && value_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_val(page, ridx, vcx[7:5], row_val);
+            s0_glyph  = g_val(r_page, ridx, vcx[7:5], row_val, mus_total[2:0]);
             s0_fcol   = vcx[4:1];
             s0_frow   = row_fr;
             s0_tcolor = C_VALUE;
-        end else if (open && hint_hv) begin
+        end else if (r_open && hint_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_hint(hcx[8:4]);
+            s0_glyph  = g_hint(r_page >= 2'd2, hcx[8:4]);
             s0_fcol   = hcx[3:0];
-            s0_frow   = y - (PY0 + PH - 28);
+            s0_frow   = y - (py0_cur + ph_cur - 28);
             s0_tcolor = C_HINT;
+        end else if (alert && alert_hv) begin
+            s0_text   = 1'b1;
+            s0_glyph  = g_msg(x[8:5] - 5'd16);
+            s0_fcol   = x[4:1];
+            s0_frow   = (y - 12'd600) >> 1;
+            s0_tcolor = 24'hFF_60_60;
+        end else if (!r_open && v_sub && sub_hv) begin
+            s0_text   = 1'b1;
+            s0_glyph  = g_sub(sub_tx[10:5], mus_name, (v_mus != 3'd0));
+            s0_fcol   = sub_tx[4:1];
+            s0_frow   = (y - 12'd600) >> 1;
+            s0_tcolor = C_TITLE;
         end
     end
 

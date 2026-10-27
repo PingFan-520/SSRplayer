@@ -1,36 +1,25 @@
 // ============================================================================
-//  wav_player.v —— 从 SD 卡播放音乐（裸 PCM / 单声道 16bit / 48kHz）
+//  wav_player.v —— 从 FAT32 卡播放 WAV（PCM 16bit / 单声道 / 48kHz）
 //
-//  ★ 这一版和之前的根本区别：**布局从卡上读，RTL 里不再有绝对扇区常量**
+//  ★ 2026-10-27 改版：不再读"自制目录扇区"，改成 FAT32 文件表 + 簇链
 //
-//  卡上的布局（tools/make_sd_image.py 保证）：
-//    扇区 DIR_SEC(=1024) ：「音乐目录」，512 字节
-//        w0 = 0x444D ("MD")   w1 = 0x5249 ("IR")   w2 = 曲目数 | (版本<<8)
-//        w4+4i .. w7+4i = 曲目 i+1 : base_lo, base_hi, 扇区数_lo, 扇区数_hi
-//    扇区 base(曲目 i)   ：**裸 PCM**，每 16bit 字就是一个采样
-//
-//  为什么改成这样（都是踩过的坑）：
-//    ① 以前 RTL 里写死 MUS_BASE，镜像一改布局（8 图 4 曲 -> 3 图 2 曲）就对不上，
-//       卡上读到的是图片像素，当 PCM 播出去就是尖锐噪声；而且**看不出来**。
-//    ② 以前要解析 WAV 头（跳 44 字节 + 读 data size）。ffmpeg 会在头里插 LIST 块，
-//       data 就不在 44 字节处，读到的“长度”其实是 LIST 的 size，循环点全错。
-//    ③ 现在 RTL 只需要“从目录拿 base/长度”，一个字节都不用猜：
-//       目录 magic 不对 -> 直接静音 + 数码管报警（绝不把图片当音乐播）。
+//  流程：
+//    1) 曲目变化时向 fat_tbl 要第 (56 + track - 1) 条记录（起始簇 / 大小 / 名字）
+//    2) 读文件第 0 个扇区，在头里找 "data" 块，拿到数据偏移和长度
+//       （ffmpeg 会在 RIFF 里插 LIST 块，写死 44 字节必错 —— 这里按标签找）
+//    3) 按簇链连续读，跳过头部，每 16bit 一个字 = 一个采样，写进异步 FIFO
+//    4) 播到 data 末尾回到开头循环
 //
 //  结构：
-//    SD 域(25MHz)：读目录扇区 -> 按扇区连续读 -> 每字一个采样 -> 异步 FIFO
+//    SD 域(25MHz)：文件表 -> 头解析 -> 簇链读 -> FIFO
 //    像素域(37.5MHz)：48kHz 节拍取一个采样 -> 乘音量 -> 24bit 送 HDMI
 //
-//  为什么 FIFO 要 1024 深：
-//    一个扇区 = 256 采样 = 5.3ms；1024 深 ≈ 21ms。
-//    换图时 SD 总线被图片读取占用（音频优先但仍按扇区抢），需要这点余量兜住。
-//    不要再加大：2048 要多占 2 块 M9K，这块板 BRAM 余量很紧。
+//  FIFO 1024 深 ≈ 21ms：换图时 SD 总线被图片占用也能兜住。
 // ============================================================================
 `timescale 1ns / 1ps
 
 module wav_player #(
-    parameter integer DIR_SEC    = 1024,     // 音乐目录扇区（永远在图片区之前）
-    parameter integer TRK_NUM    = 4,        // 曲目数
+    parameter integer TRK_NUM    = 6,
     parameter integer CLK_HZ     = 37_500_000,
     parameter integer SAMPLE_HZ  = 48_000
 )(
@@ -40,6 +29,17 @@ module wav_player #(
 
     input  wire [2:0]  track,        // 1..TRK_NUM 播放；0 = 关闭
     input  wire [3:0]  vol,          // 0..10
+
+    // ---- FAT 布局 ----
+    input  wire [31:0] fat_lba,
+    input  wire [31:0] data_lba,
+    input  wire [3:0]  spc_log2,
+
+    // ---- 文件表 ----
+    output reg         tbl_req,
+    output reg  [5:0]  tbl_rec,
+    input  wire        tbl_done,
+    input  wire [127:0] tbl_data,
 
     // ---- 到 sd_arb ----
     output reg         s_req,
@@ -53,12 +53,13 @@ module wav_player #(
     output reg  [23:0] aud_left,
     output reg  [23:0] aud_right,
     output wire [7:0]  level,        // 当前电平（给可视化）
-    output wire        trk_bad,      // 1 = 目录无效（卡不是当前镜像）
-    output wire [15:0] dbg_hdr       // 目录扇区第一个字（数码管诊断用）
+    output wire        trk_bad,      // 1 = 当前曲目无效（文件读不到）
+    output reg  [63:0] trk_name,     // 当前曲目的 8.3 名字（SD 域，稳定）
+    output reg  [15:0] dbg_hdr       // 文件头第一个字（诊断）
 );
 
     // ==================================================================
-    // 1) track 从像素域同步到 SD 域 + 变化检测
+    // 1) track 同步到 SD 域
     // ==================================================================
     reg [2:0] trk_s1, trk_s2, trk_d;
 
@@ -76,128 +77,233 @@ module wav_player #(
 
     wire        en      = (trk_s2 != 3'd0) && (trk_s2 <= TRK_NUM[2:0]);
     wire        trk_chg = (trk_s2 != trk_d);
-    wire [1:0]  tidx    = trk_s2[1:0] - 2'd1;   // 0..3（trk_s2=0 时不用）
 
     // ==================================================================
     // 2) SD 域状态机
     // ==================================================================
-    localparam [2:0] S_DREQ = 3'd0,   // 请求目录扇区
-                     S_DRCV = 3'd1,   // 收目录扇区
-                     S_DEND = 3'd2,   // 等 busy 落下 -> 校验 magic
-                     S_IDLE = 3'd3,   // 准备读音频
-                     S_REQ  = 3'd4,   // 已发请求，等 256 个字
-                     S_NEXT = 3'd5;   // 一个扇区收完，等 busy 落下
+    localparam [3:0] S_IDLE = 4'd0,
+                     S_TBL  = 4'd1,
+                     S_H0   = 4'd2,   // 读文件头扇区
+                     S_H1   = 4'd3,
+                     S_H2   = 4'd4,   // 收 512 字节并找 "data"
+                     S_H3   = 4'd5,   // 等 busy 落下，算数据区间
+                     S_REQ  = 4'd6,   // 数据扇区
+                     S_NEXT = 4'd7,
+                     S_F0   = 4'd8,   // FAT 扇区
+                     S_F1   = 4'd9,
+                     S_F2   = 4'd10;
 
-    localparam [15:0] MAG0 = 16'h444D;   // "MD"（小端：先 'M' 后 'D'）
-    localparam [15:0] MAG1 = 16'h5249;   // "IR"
-
-    // FIFO 状态（声明放在使用它的状态机之前）
+    // FIFO 状态
     wire        fifo_full, fifo_empty, fifo_rvld;
     wire [15:0] fifo_dout;
     wire [10:0] fifo_used;
 
-    reg [2:0]  st;
-    reg        bsync;             // 已经看到本扇区的 busy 上升沿
-    reg [31:0] sec_cnt;           // 本曲第几个扇区
-    reg [8:0]  wcnt;              // 本扇区已收字数
+    reg [3:0]  st;
+    reg        bsync;
+    reg [9:0]  bcnt;
+    reg [8:0]  wcnt;
+    reg        pend_v;
+    reg [7:0]  pend;
 
-    reg [15:0] dw [0:19];         // 目录扇区前 20 个字（magic + 4 首的 base/长度）
-    reg [31:0] tbase [0:3];       // 每首起始扇区
-    reg [31:0] tlen  [0:3];       // 每首扇区数（精确，循环点无填充静音）
-    reg        dir_ok;            // 目录有效
-    reg        dir_tried;         // 至少尝试过一次（trk_bad 才有意义）
-    reg [23:0] retry;             // 目录读失败后的重试间隔计数
+    reg [31:0] cur_clus;
+    reg [7:0]  sec_in;
+    reg [31:0] fsize;          // 文件总字节数
+    reg [31:0] foff;           // FAT 扇区内偏移
+    reg [31:0] nxt_clus;
+    reg        fav;
+
+    reg [31:0] data_len;       // 音频数据字节数
+    reg [31:0] words_left;     // 还要播多少个 16bit 采样
+    reg        got_tag;
+    reg [1:0]  sz_k;
+    reg [31:0] tag_sr;
+    reg [31:0] hdr_sz;
+    reg [31:0] hdr_off;
+
+    reg        dir_ok;         // 当前曲目有效
+    reg        dir_tried;
+    reg        en_d;
+    reg [23:0] retry;
 
     wire [15:0] word_le = {s_data[7:0], s_data[15:8]};   // SPI 先到的字节在高位
 
-    wire [31:0] cur_base = tbase[tidx];
-    wire [31:0] cur_len  = tlen[tidx];
+    wire [31:0] cl_off = (cur_clus - 32'd2) << spc_log2;
+    wire        byte_en = s_val | pend_v;
+    wire [7:0]  byte_d  = s_val ? s_data[15:8] : pend;
 
-    integer k;
+    reg  [8:0]  skip_cnt;                              // 数据区开头要跳过的字数
+    wire        fifo_wr_ok = s_val & bsync & en & dir_ok & (st == S_REQ) & ~fifo_full;
+    wire        fifo_wr    = fifo_wr_ok & (skip_cnt == 9'd0);
 
     always @(posedge clk_sd or posedge rst) begin
         if (rst) begin
-            st        <= S_DREQ;
+            st        <= S_IDLE;
             s_req     <= 1'b0;
             s_sec     <= 32'd0;
-            sec_cnt   <= 32'd0;
-            wcnt      <= 9'd0;
             bsync     <= 1'b0;
+            bcnt      <= 10'd0;
+            wcnt      <= 9'd0;
+            pend_v    <= 1'b0;
+            pend      <= 8'd0;
+            cur_clus  <= 32'd0;
+            sec_in    <= 8'd0;
+            fsize     <= 32'd0;
+            foff      <= 32'd0;
+            nxt_clus  <= 32'd0;
+            fav       <= 1'b0;
+            data_len  <= 32'd0;
+            words_left<= 32'd0;
+            got_tag   <= 1'b0;
+            sz_k      <= 2'd0;
+            tag_sr    <= 32'd0;
+            hdr_sz    <= 32'd0;
+            hdr_off   <= 32'd44;
             dir_ok    <= 1'b0;
             dir_tried <= 1'b0;
+            en_d      <= 1'b0;
             retry     <= 24'd0;
-            for (k = 0; k < 4; k = k + 1) begin
-                tbase[k] <= 32'd0;
-                tlen[k]  <= 32'd0;
-            end
+            tbl_req   <= 1'b0;
+            tbl_rec   <= 6'd56;
+            skip_cnt  <= 9'd22;
+            trk_name  <= 64'd0;
+            dbg_hdr   <= 16'd0;
         end else begin
+            en_d <= en;
+
+            // 头部跳过计数
+            if (st == S_H3)
+                skip_cnt <= got_tag ? hdr_off[9:1] : 9'd22;
+            else if (st == S_NEXT && words_left == 32'd0)
+                skip_cnt <= got_tag ? hdr_off[9:1] : 9'd22;
+            else if (fifo_wr_ok && (skip_cnt != 9'd0))
+                skip_cnt <= skip_cnt - 9'd1;
+
+            // 采样计数（决定循环点）
+            if (fifo_wr && (words_left != 32'd0))
+                words_left <= words_left - 32'd1;
+
+            // 16bit -> 2 字节
+            if (s_val) begin
+                pend   <= s_data[7:0];
+                pend_v <= 1'b1;
+            end else if (pend_v) begin
+                pend_v <= 1'b0;
+            end
+
             case (st)
-                // ---------------- 读目录扇区 ----------------
-                S_DREQ: begin
-                    s_req <= 1'b1;
-                    s_sec <= DIR_SEC[31:0];
-                    wcnt  <= 9'd0;
-                    bsync <= 1'b0;
-                    st    <= S_DRCV;
-                end
-
-                S_DRCV: begin
-                    if (s_busy) bsync <= 1'b1;
-                    if (bsync && s_val) begin
-                        if (wcnt < 9'd20) dw[wcnt[4:0]] <= word_le;
-                        if (wcnt == 9'd255) begin
-                            wcnt  <= 9'd0;
-                            s_req <= 1'b0;
-                            bsync <= 1'b0;
-                            st    <= S_DEND;
-                        end else wcnt <= wcnt + 9'd1;
-                    end
-                end
-
-                S_DEND: begin
-                    // 等 busy 真正落下，再判 magic
-                    if (!s_busy) begin
-                        dir_tried <= 1'b1;
-                        if ((dw[0] == MAG0) && (dw[1] == MAG1)) begin
-                            dir_ok <= 1'b1;
-                            retry  <= 24'd0;
-                            for (k = 0; k < 4; k = k + 1) begin
-                                tbase[k] <= {dw[4*k+5], dw[4*k+4]};
-                                tlen[k]  <= {dw[4*k+7], dw[4*k+6]};
-                            end
-                        end else begin
-                            dir_ok <= 1'b0;
-                            retry  <= 24'd0;
-                        end
-                        st <= S_IDLE;
-                    end
-                end
-
-                // ---------------- 正常播放 ----------------
+                // ---------------- 取文件表 ----------------
                 S_IDLE: begin
                     s_req <= 1'b0;
-                    if (dir_ok) begin
-                        if (en && (cur_len != 32'd0)) begin
-                            sec_cnt <= 32'd0;
-                            s_sec   <= cur_base;
-                            wcnt    <= 9'd0;
-                            bsync   <= 1'b0;
-                            s_req   <= 1'b1;
-                            st      <= S_REQ;
-                        end
-                    end else if (retry == 24'hFFFFFF) begin
-                        st <= S_DREQ;          // 约 0.67 秒后重试读目录
-                    end else
-                        retry <= retry + 24'd1;
+                    if (en && (trk_chg || !en_d || !dir_tried)) begin
+                        tbl_rec <= 6'd56 + {3'd0, trk_s2} - 6'd1;
+                        tbl_req <= 1'b1;
+                        st      <= S_TBL;
+                    end
                 end
 
+                S_TBL: begin
+                    if (tbl_done) begin
+                        tbl_req   <= 1'b0;
+                        dir_tried <= 1'b1;
+                        cur_clus  <= tbl_data[31:0];
+                        fsize     <= tbl_data[63:32];
+                        trk_name  <= tbl_data[127:64];
+                        sec_in    <= 8'd0;
+                        bcnt      <= 10'd0;
+                        bsync     <= 1'b0;
+                        if ((tbl_data[31:0] < 32'd2) || (tbl_data[31:0] >= 32'h0FFFFFF8) ||
+                            (tbl_data[63:32] < 32'd64)) begin
+                            dir_ok <= 1'b0;
+                            st     <= S_IDLE;          // 无效曲目：静音
+                        end else begin
+                            dir_ok <= 1'b1;
+                            st     <= S_H0;
+                        end
+                    end
+                end
+
+                // ---------------- 读文件头，找 data 块 ----------------
+                S_H0: begin
+                    // ★ 等上一位使用者的 busy 落干净再发（换曲时上一条还在收尾，
+                    //   否则会把尾巴当成自己的传输、撤请求后永远等不到数据）
+                    if (!s_busy) begin
+                        s_sec <= data_lba + cl_off;
+                        s_req <= 1'b1;
+                        bcnt  <= 10'd0;
+                        bsync <= 1'b0;
+                        got_tag <= 1'b0;
+                        sz_k    <= 2'd0;
+                        tag_sr  <= 32'd0;
+                        st    <= S_H1;
+                    end
+                end
+
+                S_H1: begin
+                    if (s_busy) begin
+                        bsync <= 1'b1;
+                        s_req <= 1'b0;            // ★ busy 一起来就撤，避免重复授权
+                        st    <= S_H2;
+                    end
+                end
+
+                S_H2: begin
+                    if (bsync && byte_en) begin
+                        if (bcnt == 10'd0) dbg_hdr[7:0]  <= byte_d;
+                        if (bcnt == 10'd1) dbg_hdr[15:8] <= byte_d;
+                        // 逐字节匹配 "data"
+                        tag_sr <= {tag_sr[23:0], byte_d};
+                        if (sz_k != 2'd0) begin
+                            case (sz_k)
+                                2'd1: hdr_sz[7:0]   <= byte_d;
+                                2'd2: hdr_sz[15:8]  <= byte_d;
+                                2'd3: hdr_sz[23:16] <= byte_d;
+                            endcase
+                            if (sz_k == 2'd3) sz_k <= 2'd0;
+                            else              sz_k <= sz_k + 2'd1;
+                        end else if ({tag_sr[23:0], byte_d} == 32'h64617461) begin
+                            // 'd''a''t''a' 刚凑齐：后面 4 字节是长度
+                            hdr_off <= {22'd0, bcnt} + 32'd5;   // 'd' 位置 + 8
+                            hdr_sz  <= 32'd0;
+                            sz_k    <= 2'd1;
+                            got_tag <= 1'b1;
+                        end
+                        bcnt <= bcnt + 10'd1;
+                        if (bcnt == 10'd511) begin
+                            bcnt  <= 10'd0;
+                            bsync <= 1'b0;
+                            s_req <= 1'b0;
+                            st    <= S_H3;
+                        end
+                    end
+                end
+
+                S_H3: begin
+                    if (!s_busy) begin
+                        data_len <= got_tag ? hdr_sz  : (fsize - 32'd44);
+                        if (!got_tag || (hdr_sz == 32'd0) ||
+                            (hdr_off + 32'd8 > fsize)) begin
+                            // 头里没有 data 块：退回"44 字节头 + 剩余全是数据"
+                            data_len <= (fsize > 32'd44) ? (fsize - 32'd44) : 32'd0;
+                        end
+                        words_left <= got_tag ? (hdr_sz >> 1) : ((fsize - 32'd44) >> 1);
+                        cur_clus   <= tbl_data[31:0];
+                        sec_in     <= 8'd0;
+                        wcnt       <= 9'd0;
+                        bsync      <= 1'b0;
+                        st         <= S_REQ;
+                        s_req      <= 1'b1;
+                        s_sec      <= data_lba + cl_off;
+                    end
+                end
+
+                // ---------------- 数据流 ----------------
                 S_REQ: begin
                     if (s_busy) bsync <= 1'b1;
                     if (bsync && s_val) begin
                         if (wcnt == 9'd255) begin
                             wcnt  <= 9'd0;
-                            s_req <= 1'b0;
                             bsync <= 1'b0;
+                            s_req <= 1'b0;
                             st    <= S_NEXT;
                         end else
                             wcnt <= wcnt + 9'd1;
@@ -206,46 +312,95 @@ module wav_player #(
 
                 S_NEXT: begin
                     s_req <= 1'b0;
-                    // FIFO 快满就先别读（留 324 字余量 > 一整个扇区），
-                    // 否则写不进去的采样会被静默丢掉
                     if (!s_busy && (fifo_used < 11'd700)) begin
-                        if (sec_cnt + 32'd1 >= cur_len) begin
-                            sec_cnt <= 32'd0;
-                            s_sec   <= cur_base;              // 循环
+                        if (words_left == 32'd0) begin
+                            // 循环：回到数据区开头
+                            cur_clus  <= tbl_data[31:0];
+                            sec_in    <= 8'd0;
+                            words_left<= (got_tag ? (hdr_sz >> 1) : (data_len >> 1));
+                            s_sec     <= data_lba + ((tbl_data[31:0] - 32'd2) << spc_log2);
+                            s_req     <= 1'b1;
+                            st        <= S_REQ;
+                        end else if (sec_in + 8'd1 < (8'd1 << spc_log2)) begin
+                            sec_in <= sec_in + 8'd1;
+                            s_sec  <= data_lba + cl_off + {22'd0, sec_in} + 32'd1;
+                            s_req  <= 1'b1;
+                            st     <= S_REQ;
                         end else begin
-                            sec_cnt <= sec_cnt + 32'd1;
-                            s_sec   <= cur_base + sec_cnt + 32'd1;
+                            foff <= {24'd0, cur_clus[6:0]} << 2;
+                            st   <= S_F0;
+                        end
+                    end
+                end
+
+                S_F0: begin
+                    s_sec <= fat_lba + {23'd0, cur_clus[31:7]};
+                    s_req <= 1'b1;
+                    bcnt  <= 10'd0;
+                    bsync <= 1'b0;
+                    nxt_clus <= 32'hFFFFFFFF;
+                    st    <= S_F1;
+                end
+
+                S_F1: begin
+                    if (s_busy) begin
+                        bsync <= 1'b1;
+                        s_req <= 1'b0;
+                        st    <= S_F2;
+                    end
+                end
+
+                S_F2: begin
+                    if (fav) begin
+                        fav <= 1'b0;
+                        if ((nxt_clus >= 32'h0FFFFFF8) || (nxt_clus < 32'd2)) begin
+                            // 链断了：从当前簇重来（不至于停播）
+                            cur_clus <= tbl_data[31:0];
+                            sec_in   <= 8'd0;
+                            s_sec    <= data_lba + ((tbl_data[31:0] - 32'd2) << spc_log2);
+                        end else begin
+                            cur_clus <= nxt_clus;
+                            sec_in   <= 8'd0;
+                            s_sec    <= data_lba + ((nxt_clus - 32'd2) << spc_log2);
                         end
                         s_req <= 1'b1;
                         st    <= S_REQ;
+                    end
+                    if (bsync && byte_en) begin
+                        if (bcnt == foff[9:0])         nxt_clus[7:0]   <= byte_d;
+                        if (bcnt == foff[9:0] + 10'd1) nxt_clus[15:8]  <= byte_d;
+                        if (bcnt == foff[9:0] + 10'd2) nxt_clus[23:16] <= byte_d;
+                        if (bcnt == foff[9:0] + 10'd3) nxt_clus[31:24] <= byte_d;
+                        bcnt <= bcnt + 10'd1;
+                        if (bcnt == 10'd511) begin
+                            bcnt  <= 10'd0;
+                            bsync <= 1'b0;
+                            s_req <= 1'b0;
+                            fav   <= 1'b1;
+                        end
                     end
                 end
 
                 default: st <= S_IDLE;
             endcase
 
-            // 切曲 / 关闭：只中断**正在进行的音频扇区**。
-            //   ★ 不能无条件把 st 拉回 S_IDLE：上电时 en 还是 0（track 要同步两级），
-            //     那样会连目录都读不到，然后卡在 S_IDLE 等 0.67 秒重试。
-            //     目录与曲目无关，任何情况下都不打断目录读。
-            if ((trk_chg || !en) && ((st == S_REQ) || (st == S_NEXT))) begin
-                st      <= S_IDLE;
-                s_req   <= 1'b0;
-                sec_cnt <= 32'd0;
-                wcnt    <= 9'd0;
-                bsync   <= 1'b0;
+            // 切曲 / 关闭：只允许打断数据流，不打断表/头解析
+            if ((trk_chg || !en) && ((st == S_REQ) || (st == S_NEXT) ||
+                                     (st == S_F0) || (st == S_F1) || (st == S_F2))) begin
+                st       <= S_IDLE;
+                s_req    <= 1'b0;
+                bsync    <= 1'b0;
+                wcnt     <= 9'd0;
+                dir_ok   <= 1'b0;
+                dir_tried<= 1'b0;
             end
         end
     end
 
     // ==================================================================
-    // 3) 异步 FIFO：SD 域写、像素域读
+    // 3) FIFO 写入：跳过 WAV 头
     // ==================================================================
     reg         fifo_rd;
-    // 每个字就是一个采样（裸 PCM，没有头要跳过）。
-    // bsync 必不可少：只有“本扇区 busy 起来之后”收到的字才算数据，
-    // 否则上一扇区尾巴/仲裁切主时残留的字会被写进 FIFO，整条流从此错位。
-    wire        fifo_wr = s_val & bsync & en & dir_ok & ~fifo_full;
 
     afifo #(.DW(16), .AW(10)) u_fifo (
         .clk_w(clk_sd), .clk_r(clk),
@@ -254,6 +409,8 @@ module wav_player #(
         .rd_en(fifo_rd), .rd_data(fifo_dout), .rd_empty(fifo_empty),
         .rd_valid(fifo_rvld), .wr_used(fifo_used)
     );
+
+    assign trk_bad = dir_tried & ~dir_ok;
 
     // ==================================================================
     // 4) 像素域：48kHz 取样 + 音量
@@ -273,9 +430,8 @@ module wav_player #(
     end
 
     reg signed [15:0] samp;
-    reg [11:0]        starve;      // 连续多少次节拍没拿到数据
+    reg [11:0]        starve;
 
-    // 音量 0..10 -> 9 位增益（与 tone_gen 同一张表）
     reg [8:0] vol_g;
     always @(*) begin
         case (vol)
@@ -293,24 +449,15 @@ module wav_player #(
         endcase
     end
 
-    // 注意：vol_g 满档是 256（9 位），不能截成 8 位，否则满音量会变成 0（静音）
     wire signed [24:0] prod   = samp * $signed({1'b0, vol_g});
     wire signed [15:0] g16    = prod[23:8];
     wire        [23:0] scaled = { {2{g16[15]}}, g16, 8'd0 };
     wire        [15:0] mag    = g16[15] ? (~g16 + 16'd1) : g16;
 
-    assign level   = mag[15:7];                     // 0..255
-    assign trk_bad = dir_tried & ~dir_ok;           // 卡上目录无效
-    assign dbg_hdr = dw[0];                         // 数码管：目录扇区第一个字
-                                                    //   444D = "MD"（正常，不该看到）
-                                                    //   424D = "BM"（读到的是图片 -> 卡不对）
-                                                    //   0000 = 目录扇区是空的（旧镜像/没写进去）
+    assign level = mag[15:7];
 
     // ==================================================================
     // 5) 输出：aud_valid 严格 48kHz 连续
-    //    HDMI 核按 valid 采样，一旦少给一拍，接收端音频 PLL 会抖 -> 爆音。
-    //    FIFO 见底时保持上一个采样；但长期（>80ms）没数据就归零，
-    //    否则电平表会一直挂着一根不动的柱子。
     // ==================================================================
     reg tick_d, tick_d2, tick_d3;
 
@@ -337,8 +484,6 @@ module wav_player #(
                 else                   samp   <= 16'sd0;
             end
 
-            // aud_valid 比 tick 晚 3 拍：此时 samp 已经是本次弹出的采样，
-            // 与 aud_left 严格同拍（第 k 个 valid 就是文件第 k 个采样）
             aud_valid <= tick_d3;
             aud_left  <= en ? scaled : 24'd0;
             aud_right <= en ? scaled : 24'd0;

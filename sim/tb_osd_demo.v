@@ -16,10 +16,10 @@ module tb_osd_demo;
 
     localparam integer HACT = 1280;
     localparam integer VACT = 720;
-    localparam integer PX0  = 360;
-    localparam integer PY0  = 110;
-    localparam integer PW   = 560;
-    localparam integer PH   = 500;
+    localparam integer PX0  = 340;
+    localparam integer PY0  = 30;
+    localparam integer PW   = 600;
+    localparam integer PH   = 660;
 
     reg         clk = 1'b0;
     always #6.6667 clk = ~clk;            // 75MHz
@@ -53,8 +53,9 @@ module tb_osd_demo;
         .img_changed(1'b0),
         .ext_rgb(16'd0),
         .raw_de(), .raw_x(), .raw_y(),
-        .dbg_ext(8'd0),
-        .aud_samp(16'sd0), .aud_samp_v(1'b0), .aud_meter_en(1'b1)
+        .dbg_ext(16'd0),
+        .aud_samp(16'sd0), .aud_samp_v(1'b0), .aud_meter_en(1'b1),
+        .mus_total(4'd3), .mus_name(64'h2020_3130_5453_4554), .media_alert(1'b0)
     );
 
     // ------------------------------------------------------------------
@@ -120,6 +121,7 @@ module tb_osd_demo;
                 13: fd = $fopen("bright_base.ppm","wb");
                 14: fd = $fopen("bright_low.ppm", "wb");
                 15: fd = $fopen("sub_off.ppm",    "wb");
+                17: fd = $fopen("sub_play.ppm",   "wb");
                 default: fd = $fopen("sub_on.ppm", "wb");
             endcase
             $fwrite(fd, "P6\n%0d %0d\n255\n", FW, FH);
@@ -139,7 +141,10 @@ module tb_osd_demo;
             case (id)
                 0: fd = $fopen("menu_closed.ppm",  "wb");
                 1: fd = $fopen("menu_open.ppm",    "wb");
-                3: fd = $fopen("menu_slide.ppm",   "wb");
+                2: fd = $fopen("menu_img.ppm",     "wb");
+                3: fd = $fopen("menu_img2.ppm",    "wb");
+                4: fd = $fopen("menu_music.ppm",   "wb");
+                5: fd = $fopen("menu_vu.ppm",      "wb");
                 default: fd = $fopen("menu_closed2.ppm", "wb");
             endcase
             $fwrite(fd, "P6\n%0d %0d\n255\n", PW, PH);
@@ -153,6 +158,9 @@ module tb_osd_demo;
     task shot;
         input integer id;
         begin
+            // 菜单状态在帧首才生效（防撕裂），这里等两帧再抓，
+            // 免得抓到"按键已经按下、面板还没画"的那一帧
+            wait_frames(2);
             @(posedge clk);
             wait (de && (x == PX0 + PW - 1) && (y == PY0 + PH - 1));
             @(posedge clk);
@@ -177,6 +185,21 @@ module tb_osd_demo;
         end
     endtask
 
+    integer n_fail = 0;
+
+    task chk;
+        input [255:0] name;
+        input integer got;
+        input integer exp;
+        begin
+            if (got !== exp) begin
+                $display("[FAIL] %0s: got %0d exp %0d", name, got, exp);
+                n_fail = n_fail + 1;
+            end else
+                $display("[ ok ] %0s = %0d", name, got);
+        end
+    endtask
+
     task press;
         input integer k;
         begin
@@ -191,51 +214,155 @@ module tb_osd_demo;
     initial begin
         #1000 rst_n = 1'b1;
 
-        // 1) 关菜单：彩条 + 底部字幕
-        repeat (2) @(posedge vs);
-        shot(0);
-        dump_full(13);                    // 基准亮度 100%
+        // ------------------------------------------------------------------
+        // 0) 默认态：字幕 ON / 频谱 OFF / 音乐 OFF / 轮播 OFF / 首项 IMG
+        // ------------------------------------------------------------------
+        repeat (4) @(posedge vs);
+        $display("---- default state ----");
+        chk("menu_open",  mo,              1'b0);
+        chk("cfg_mus",    dut.ef_mus,      3'd0);
+        chk("cfg_meter",  dut.ef_meter,    1'b0);
+        chk("cfg_auto",   dut.ef_auto,     1'b0);
+        chk("v_sub",      dut.u_menu.v_sub, 1'b1);
+        chk("v_trans",    dut.ef_trans,    2'd0);
+        dump_full(13);                    // 待机字幕（MUSIC PHOTO FRAME）
 
-        // 2) 打开菜单
+        // ------------------------------------------------------------------
+        // 1) 设置页：7 项，光标首项 IMG
+        // ------------------------------------------------------------------
         press(0);
+        $display("---- settings page ----");
+        chk("page",  dut.u_menu.page, 2'd0);
+        chk("item",  it,              3'd0);
         shot(1);
         dump_full(0);
-        dump_full(1);                     // 相邻两帧：验证背景仍在动
 
-        // 3) 下移 3 次到「缩放模式」，上移 3 次回第一项并改值 FADE -> SLIDE
-        press(2); press(2); press(2);
-        press(1); press(1); press(1);
+        // ------------------------------------------------------------------
+        // 2) OK 进入 IMG 子菜单
+        // ------------------------------------------------------------------
         press(3);
+        $display("---- image submenu ----");
+        chk("page",  dut.u_menu.page, 2'd2);
+        chk("item",  it,              3'd0);
+        chk("auto",  dut.u_menu.v_auto, 1'b0);
+        shot(2);
+        dump_full(2);
+
+        // 3) 子菜单里：OK 打开轮播，再下移改转场 FADE -> SLIDE
+        press(3);
+        $display("---- submenu: autoplay ON ----");
+        chk("v_auto", dut.u_menu.v_auto, 1'b1);
+        press(2);                          // 到「切屏效果」
+        chk("item",   it, 3'd1);
+        press(3);                          // FADE -> SLIDE
+        chk("v_trans", dut.u_menu.v_trans, 2'd1);
+        repeat (3) @(posedge vs);
+        chk("ef_auto",  dut.ef_auto,  1'b1);
+        chk("ef_trans", dut.ef_trans, 2'd1);
+
+        // 第 3 行：切屏间隔（默认 5s -> 8s）
+        press(2);
+        chk("item", it, 3'd2);
+        chk("v_hold_default", dut.u_menu.v_hold, 3'd1);
+        press(3);
+        chk("v_hold", dut.u_menu.v_hold, 3'd2);
+        repeat (3) @(posedge vs);
+        chk("ef_hold", dut.ef_hold, 3'd2);
         shot(3);
+        dump_full(1);
 
-        // 4) 关菜单后看三种转场中间态
+        // 4) KEY4 从子菜单直接关闭（一次按键退出）
         press(0);
-        shot(4);
-        shot_effect(2'd0, 8'd128, 10);    // FADE 50%
-        shot_effect(2'd1, 8'd96,  11);    // SLIDE 37.5%
-        shot_effect(2'd2, 8'd160, 12);    // WIPE  62.5%
+        $display("---- close from submenu ----");
+        chk("menu_open", mo, 1'b0);
 
-        // 5) 亮度 100% -> 30%
-        press(0);                         // 打开
-        press(2);                         // 光标到「亮度」
-        press(3); press(3); press(3); press(3);   // 10 -> 0 -> 1 -> 2 -> 3
-        press(0);                         // 关闭
-        dump_full(14);
-
-        // 6) 字幕 OFF
-        press(0);                         // 打开，光标仍在「亮度」
-        press(2); press(2); press(2);     // 到「字幕」
-        press(3);                         // ON -> OFF
-        press(0);                         // 关闭
+        // ------------------------------------------------------------------
+        // 5) 字幕 OFF -> ON（设置页第 6 项 = SUB）
+        // ------------------------------------------------------------------
+        press(0);                          // 打开设置页，光标回第 0 项
+        press(2); press(2); press(2);
+        press(2); press(2); press(2);      // 0 -> 6（SUB）
+        chk("item", it, 3'd6);
+        press(3);                          // ON -> OFF
+        chk("v_sub", dut.u_menu.v_sub, 1'b0);
+        press(0);
         dump_full(15);
 
-        // 7) 字幕 ON（恢复）
         press(0);
-        press(3);
+        press(2); press(2); press(2);
+        press(2); press(2); press(2);
+        press(3);                          // OFF -> ON
+        chk("v_sub", dut.u_menu.v_sub, 1'b1);
         press(0);
         dump_full(16);
 
-        $display("done, menu_open=%b", mo);
+        // ------------------------------------------------------------------
+        // 6) VU 开关（第 5 项）：默认关 -> 开 -> 关
+        // ------------------------------------------------------------------
+        press(0);
+        press(2); press(2); press(2); press(2); press(2);   // 0 -> 5（VU）
+        chk("item", it, 3'd5);
+        press(3);                          // 进入 VU 子菜单
+        chk("page_vu", dut.u_menu.page, 2'd3);
+        chk("item", it, 3'd0);
+        press(3);                          // ON
+        repeat (3) @(posedge vs);
+        chk("ef_meter_on",  dut.ef_meter, 1'b1);
+        press(2);                          // 到 MODE
+        chk("item", it, 3'd1);
+        chk("style_default", dut.u_menu.v_style, 1'b0);
+        press(3);                          // BAR -> CIRC
+        repeat (3) @(posedge vs);
+        chk("ef_style", dut.ef_style, 1'b1);
+        shot(5);
+        press(0);                          // 关闭
+
+        // ------------------------------------------------------------------
+        // 7) 音乐列表：KEY3 直接进第 1 页，默认光标在 OFF，确认后仍是 OFF
+        // ------------------------------------------------------------------
+        press(3);
+        $display("---- music list ----");
+        chk("page", dut.u_menu.page, 2'd1);
+        chk("item", it, 3'd0);
+        shot(4);
+        press(3);                          // 选 OFF
+        chk("menu_open", mo,     1'b0);
+        repeat (3) @(posedge vs);
+        chk("cfg_mus", dut.ef_mus, 3'd0);
+
+        // 8) 选 GEN -> 内置音阶（确认菜单到播放器的映射还在）
+        press(3);
+        press(2);                          // OFF -> GEN
+        press(3);
+        repeat (3) @(posedge vs);
+        chk("cfg_mus_gen", dut.ef_mus, 3'd1);
+        // 回到 OFF，保持上电默认行为
+        press(3);
+        press(1);                          // GEN -> OFF
+        press(3);
+        repeat (3) @(posedge vs);
+        chk("cfg_mus_off", dut.ef_mus, 3'd0);
+
+        // ------------------------------------------------------------------
+        // 9) 选中 T1：字幕应切成 "NOW PLAYING TEST01 MUSIC FRAME"
+        // ------------------------------------------------------------------
+        press(3);                          // 音乐列表
+        press(2); press(2);                // OFF -> GEN -> T1
+        chk("item", it, 3'd2);
+        press(3);                          // 选 T1
+        repeat (4) @(posedge vs);
+        chk("cfg_mus_t1", dut.ef_mus, 3'd2);
+        dump_full(17);
+
+        // 回到 OFF
+        press(3);
+        press(1); press(1);
+        press(3);
+        repeat (3) @(posedge vs);
+        chk("cfg_mus_final", dut.ef_mus, 3'd0);
+
+        if (n_fail == 0) $display("RESULT: PASS");
+        else             $display("RESULT: FAIL (%0d)", n_fail);
         $finish;
     end
 

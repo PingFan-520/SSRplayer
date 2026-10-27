@@ -69,3 +69,10 @@ sim/wav_in.wav
 
 commit_msg.tmp
 prj/.lock.f
+
+# ---- 仿真的可再生中间产物（tools/make_fat32_image.py 能重新生成）----
+sim/img_exp.bin
+sim/fat_exp/
+sim/preview_resample*.png
+sim/sub_zoom*.png
+sim/meter_circ_zoom.png

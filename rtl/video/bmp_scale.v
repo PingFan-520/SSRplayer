@@ -1,10 +1,13 @@
 // ============================================================================
 //  bmp_scale.v —— BMP 自适应缩放（整数缩放 + 三种显示模式）
 //
-//  帧缓存里的图片区固定 640x480。本模块把任意尺寸的 BMP 映射进这个框：
+//  帧缓存里的图片区 960x540（显示时 4:3 上采样铺满 1280x720）。
+//  本模块把任意尺寸的 BMP 映射进这个框：
 //
-//   mode = 0  FIT     等比 2^k 缩小 + 居中，整幅图可见（可能有黑边）
-//           1280x720 -> 640x360 居中，上下各 60 行黑边
+//   mode = 0  FIT     等比缩小 + 居中，整幅图可见（可能有黑边）
+//           1280x720 -> 960x540 精确 3/4 抽取（满屏，无黑边）
+//           1920x1080 -> 960x540 精确 1/2 抽取（满屏）
+//           其它尺寸 -> 2^k 缩小 + 居中
 //   mode = 1  FILL    1:1 中心裁切，铺满整个框（四边可能被裁掉）
 //           1280x720 -> 取中间 640x480 区域，放大填满画面
 //   mode = 2  STRETCH 水平缩到刚好铺满宽度，垂直 1:1 中心裁切
@@ -26,8 +29,8 @@
 `timescale 1ns / 1ps
 
 module bmp_scale #(
-    parameter integer DW = 640,       // 目标框宽
-    parameter integer DH = 480        // 目标框高
+    parameter integer DW = 960,       // 目标框宽
+    parameter integer DH = 540        // 目标框高
 )(
     input  wire        clk,
     input  wire        rst,
@@ -53,7 +56,8 @@ module bmp_scale #(
     output reg  [11:0] o_y,
     output reg  [15:0] o_rgb,
 
-    output wire [2:0]  o_k             // 当前水平缩放级别（调试用）
+    output wire [2:0]  o_k,            // 当前水平缩放级别（调试用）
+    output wire        o_busy          // 1 = 下游满 / 有像素待发，上游应停止送数
 );
 
     localparam [15:0] DWP = DW;
@@ -90,8 +94,34 @@ module bmp_scale #(
 
     assign o_k = kx;
 
-    wire [15:0] ws = img_w >> kx;      // 缩放后宽
-    wire [15:0] hs = img_h >> ky;      // 缩放后高
+    // ------------------------------------------------------------------
+    // 下游反压
+    //   原来 px_ok 不看 o_rdy：帧缓存写 FIFO 一满，像素就被静默丢掉，
+    //   丢掉一个偶数像素 → 后一个奇数像素和它配对，写到错误的字里，
+    //   画面上就是"零散的错位像素点"。
+    //   这里改成：o_rdy=0 时把像素存进 1 深保持寄存器，同时 o_busy 拉高，
+    //   上层用它把字节流停住（bmp_decode 是按字节推进的，停字节就不会再出像素）。
+    // ------------------------------------------------------------------
+    reg        hold;
+    reg [11:0] hx, hy;
+    reg [15:0] hrgb;
+
+    assign o_busy = ~o_rdy | hold;
+
+    // ------------------------------------------------------------------
+    // 3/4 精确抽取：源正好是框的 4/3（1280x720 -> 960x540）
+    //   每 4 个源像素丢掉第 4 个，目标列 = (sx>>2)*3 + sx[1:0]
+    //   纵向同理，每 4 行丢 1 行。SD 送来的像素本来就是流水，丢掉即可。
+    // ------------------------------------------------------------------
+    wire [15:0] DW43 = (DW / 3) * 4;
+    wire [15:0] DH43 = (DH / 3) * 4;
+    wire        use34 = (mode == 2'd0) && (img_w == DW43) && (img_h == DH43);
+
+    wire [11:0] tx34 = ({2'b00, s_sx[11:2]} << 1) + {2'b00, s_sx[11:2]} + {10'd0, s_sx[1:0]};
+    wire [11:0] ty34 = ({2'b00, s_sy[11:2]} << 1) + {2'b00, s_sy[11:2]} + {10'd0, s_sy[1:0]};
+
+    wire [15:0] ws = use34 ? DWP : (img_w >> kx);      // 缩放后宽
+    wire [15:0] hs = use34 ? DHP : (img_h >> ky);      // 缩放后高
 
     // 居中偏移（有符号）：源比框大时为负 -> 裁切
     wire signed [12:0] ox_s = ($signed({1'b0, DWP}) - $signed({1'b0, ws})) >>> 1;
@@ -101,15 +131,18 @@ module bmp_scale #(
     wire [3:0] kmask_x = (kx == 3'd0) ? 4'd0 : ((4'd1 << kx) - 4'd1);
     wire [3:0] kmask_y = (ky == 3'd0) ? 4'd0 : ((4'd1 << ky) - 4'd1);
 
-    wire sel_col = ((s_sx[3:0] & kmask_x) == 4'd0);
-    wire sel_row = ((s_sy[3:0] & kmask_y) == 4'd0);
+    wire sel_col = use34 ? (s_sx[1:0] != 2'd3) : ((s_sx[3:0] & kmask_x) == 4'd0);
+    wire sel_row = use34 ? (s_sy[1:0] != 2'd3) : ((s_sy[3:0] & kmask_y) == 4'd0);
 
     // 目标坐标（有符号）+ 越界裁切
     wire signed [12:0] tx_s = $signed({1'b0, (s_sx >> kx)}) + ox_s;
     wire signed [12:0] ty_s = $signed({1'b0, (s_sy >> ky)}) + oy_s;
 
-    wire in_x = (tx_s >= 13'sd0) && (tx_s < $signed({1'b0, DWP}));
-    wire in_y = (ty_s >= 13'sd0) && (ty_s < $signed({1'b0, DHP}));
+    wire in_x = use34 ? 1'b1 : ((tx_s >= 13'sd0) && (tx_s < $signed({1'b0, DWP})));
+    wire in_y = use34 ? 1'b1 : ((ty_s >= 13'sd0) && (ty_s < $signed({1'b0, DHP})));
+
+    wire [11:0] px_tx = use34 ? tx34 : tx_s[11:0];
+    wire [11:0] px_ty = use34 ? ty34 : ty_s[11:0];
 
     wire px_ok = s_we & sel_col & sel_row & in_x & in_y;
 
@@ -137,6 +170,10 @@ module bmp_scale #(
             clr_done <= 1'b0;
             cx       <= 12'd0;
             cy       <= 12'd0;
+            hold     <= 1'b0;
+            hx       <= 12'd0;
+            hy       <= 12'd0;
+            hrgb     <= 16'd0;
         end else begin
             o_we     <= 1'b0;
             clr_done <= 1'b0;
@@ -168,11 +205,26 @@ module bmp_scale #(
                 clr_run <= 1'b1;
                 cx      <= 12'd0;
                 cy      <= 12'd0;
+            end else if (hold) begin
+                if (o_rdy) begin
+                    o_we  <= 1'b1;
+                    o_x   <= hx;
+                    o_y   <= hy;
+                    o_rgb <= hrgb;
+                    hold  <= 1'b0;
+                end
             end else if (px_ok) begin
-                o_we  <= 1'b1;
-                o_x   <= tx_s[11:0];
-                o_y   <= ty_s[11:0];
-                o_rgb <= s_rgb;
+                if (o_rdy) begin
+                    o_we  <= 1'b1;
+                    o_x   <= px_tx;
+                    o_y   <= px_ty;
+                    o_rgb <= s_rgb;
+                end else begin
+                    hx   <= px_tx;
+                    hy   <= px_ty;
+                    hrgb <= s_rgb;
+                    hold <= 1'b1;
+                end
             end
         end
     end

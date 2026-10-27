@@ -29,6 +29,7 @@ module audio_meter #(
     input  wire [11:0] y,
     input  wire [NBAR*8-1:0] bars,    // 每段的显示值 0..255（低频在低位）
     input  wire        enable,        // 0 = 不显示
+    input  wire        style,         // 0 = 底部条形   1 = 圆形中央
 
     output reg         on,
     output reg  [23:0] rgb,
@@ -54,41 +55,136 @@ module audio_meter #(
     wire [7:0]  thr  = MAXH[7:0] - hh;
     wire        filled = (dy[7:0] >= thr);
 
+    // ==================================================================
+    // 圆形中央式：以 (640,360) 为圆心，32 个扇区向外发散的频谱环
+    //   边界用"平方半径"精确比较：rdiff = dx^2+dy^2-R^2 < 256*level
+    //   扇区：8 个八分圆 + lo/hi 与 tan(11.25/22.5/33.75°) 比较，纯比较+小常数乘法
+    //   两级流水：几何/平方 一级，扇区/比较 一级（clk_pix 只有 26.6ns）
+    // ==================================================================
+    wire signed [12:0] cdx = $signed({1'b0, x}) - 13'sd640;
+    wire signed [12:0] cdy = $signed({1'b0, y}) - 13'sd360;
+    wire [11:0] ax = cdx[12] ? (~cdx[11:0] + 12'd1) : cdx[11:0];
+    wire [11:0] ay = cdy[12] ? (~cdy[11:0] + 12'd1) : cdy[11:0];
+    wire [11:0] dhi = (ax >= ay) ? ax : ay;
+    wire [11:0] dlo = (ax >= ay) ? ay : ax;
+
+    // ---- 第 1 级：几何 + 平方 ----
+    reg [11:0] ax_r, ay_r, dhi_r, dlo_r;
+    reg        sx_r, sy_r;
+    reg [23:0] rsq_r;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ax_r <= 12'd0; ay_r <= 12'd0; dhi_r <= 12'd0; dlo_r <= 12'd0;
+            sx_r <= 1'b0;  sy_r <= 1'b0;  rsq_r <= 24'd0;
+        end else begin
+            ax_r  <= ax;  ay_r  <= ay;
+            dhi_r <= dhi; dlo_r <= dlo;
+            sx_r  <= cdx[12];
+            sy_r  <= cdy[12];
+            rsq_r <= (ax * ax) + (ay * ay);
+        end
+    end
+
+    // ---- 第 2 级：扇区 + 边界 ----
+    wire [13:0] q_lo5  = {2'b00, dlo_r} + {2'b00, dlo_r, 2'b00};
+    wire [13:0] q_hi   = {2'b00, dhi_r};
+    wire [13:0] q_lo12 = {2'b00, dlo_r, 3'b000} + {2'b00, dlo_r, 2'b00};
+    wire [13:0] q_hi5  = {2'b00, dhi_r} + {2'b00, dhi_r, 2'b00};
+    wire [13:0] q_lo3  = {2'b00, dlo_r} + {2'b00, dlo_r, 1'b0};
+    wire [13:0] q_hi2  = {2'b00, dhi_r, 1'b0};
+
+    wire [1:0]  csub = {1'b0, (q_lo5  >= q_hi )} +
+                       {1'b0, (q_lo12 >= q_hi5)} +
+                       {1'b0, (q_lo3  >= q_hi2)};
+
+    wire [2:0]  oct = sy_r ? (sx_r ? ((ax_r >= ay_r) ? 3'd4 : 3'd5)
+                                   : ((ax_r >= ay_r) ? 3'd7 : 3'd6))
+                           : (sx_r ? ((ax_r >= ay_r) ? 3'd3 : 3'd2)
+                                   : ((ax_r >= ay_r) ? 3'd0 : 3'd1));
+    wire [4:0]  cbin = {oct, 2'b00} + {3'd0, csub};
+
+    wire [7:0]  clv  = bars[{cbin, 3'b000} +: 8];
+    // rdiff < (level<<8) 一次比较同时判断"在内圆外"和"在柱长内"
+    // （rsq < R^2 时 rdiff 回绕成极大值，天然不满足）
+    wire [23:0] rdiff = rsq_r - 24'd8100;
+    wire        cfilled = (rdiff < {clv, 8'd0});
+    // 颜色也按平方半径分级，否则色带是八边形（rad 是八边形近似）
+    wire [3:0]  zc_c  = (rdiff > 24'd53248) ? 4'd13 : rdiff[15:12];
+
     // 纵向彩虹渐变：14 级（每 8 像素一级，正好 dy[6:3]，纯移位）
-    wire [3:0]  zc = dy[6:3];
+    wire [3:0]  zc = style ? zc_c : dy[6:3];
+
+    // 配色：把"样式位"并进查表下标 {style, zc}，一个 32 项 case 搞定，
+    // 比"两张表 + 2:1 mux"少一级选择器（clk_pix 余量本来就紧）。
+    //   条形（style=0）：红 -> 黄 -> 绿 -> 青 -> 蓝 -> 紫 的完整彩虹（观感更好）
+    //   圆形（style=1）：冷色调，青绿 -> 青 -> 天蓝 -> 靛 -> 紫，色相单调过渡
+    wire [4:0]  zci = {style, zc};
     reg  [23:0] col;
 
     always @(*) begin
-        case (zc)
-            4'd0:  col = 24'hFF1040;   // 玫红
-            4'd1:  col = 24'hFF2A18;   // 红
-            4'd2:  col = 24'hFF5A10;   // 朱红
-            4'd3:  col = 24'hFF8C1A;   // 橙
-            4'd4:  col = 24'hFFC01E;   // 琥珀
-            4'd5:  col = 24'hFFE81E;   // 黄
-            4'd6:  col = 24'hC8F020;   // 黄绿
-            4'd7:  col = 24'h3CE03C;   // 绿
-            4'd8:  col = 24'h20E890;   // 青绿
-            4'd9:  col = 24'h26D2F0;   // 青
-            4'd10: col = 24'h2AA0FF;   // 天蓝
-            4'd11: col = 24'h3355FF;   // 蓝
-            4'd12: col = 24'h7038F0;   // 靛
-            default: col = 24'hA050FF; // 紫
+        case (zci)
+            // ---- 条形：彩虹（不变）----
+            5'd0:  col = 24'hFF1040;   // 玫红
+            5'd1:  col = 24'hFF2A18;   // 红
+            5'd2:  col = 24'hFF5A10;   // 朱红
+            5'd3:  col = 24'hFF8C1A;   // 橙
+            5'd4:  col = 24'hFFC01E;   // 琥珀
+            5'd5:  col = 24'hFFE81E;   // 黄
+            5'd6:  col = 24'hC8F020;   // 黄绿
+            5'd7:  col = 24'h3CE03C;   // 绿
+            5'd8:  col = 24'h20E890;   // 青绿
+            5'd9:  col = 24'h26D2F0;   // 青
+            5'd10: col = 24'h2AA0FF;   // 天蓝
+            5'd11: col = 24'h3355FF;   // 蓝
+            5'd12: col = 24'h7038F0;   // 靛
+            5'd13: col = 24'hA050FF;   // 紫
+            // ---- 圆形：冷色调（青绿 -> 青 -> 蓝 -> 靛 -> 紫）----
+            5'd16: col = 24'h00EFE2;   // 青绿
+            5'd17: col = 24'h00E2F4;   // 碧
+            5'd18: col = 24'h00D0FF;   // 青
+            5'd19: col = 24'h00C8FF;   // 亮青蓝
+            5'd20: col = 24'h00AAFF;   // 天蓝
+            5'd21: col = 24'h008CFF;   // 蓝
+            5'd22: col = 24'h1473FF;   // 宝蓝
+            5'd23: col = 24'h285FFF;   // 蓝
+            5'd24: col = 24'h4650FA;   // 蓝紫
+            5'd25: col = 24'h6446F2;   // 靛
+            5'd26: col = 24'h7D46E6;   // 紫罗兰
+            5'd27: col = 24'h914BD8;   // 紫
+            5'd28: col = 24'hA055C8;   // 淡紫
+            default: col = 24'hAA5FBC; // 外层暗紫
         endcase
     end
 
-    wire filled_ok = in_area & enable & ~ingap & filled;
+    wire bar_ok  = in_area & ~ingap & filled;
+    wire filled_ok = enable & (style ? cfilled : bar_ok);
 
-    // 输出寄存一拍：上层用 xd3/yd3（比视频早一拍）算，寄存后正好与视频对齐
+    // 两级流水：圆形频谱里有 2 个乘法 + 32:1 选择，一级不够（clk_pix 只剩 0.07ns）。
+    // 上层改用 xd2/yd2（比视频早两拍）送坐标，总延迟仍是 4 拍，与视频对齐。
+    reg        p_on;
+    reg [23:0] p_rgb;
+    reg [3:0]  p_alpha;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            p_on <= 1'b0; p_rgb <= 24'd0; p_alpha <= 4'd0;
+        end else begin
+            p_on    <= filled_ok;
+            p_rgb   <= col;
+            p_alpha <= filled_ok ? 4'd8 : 4'd0;
+        end
+    end
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             on    <= 1'b0;
             rgb   <= 24'd0;
             alpha <= 4'd0;
         end else begin
-            on    <= filled_ok;
-            rgb   <= col;
-            alpha <= filled_ok ? 4'd8 : 4'd0;
+            on    <= p_on;
+            rgb   <= p_rgb;
+            alpha <= p_alpha;
         end
     end
 
@@ -146,12 +242,14 @@ module spectrum #(
     reg        [7:0]  mag  [0:NB-1];     // 本块能量（已压成 8bit）
     reg        [7:0]  disp [0:NB-1];     // 显示值（带衰减）
 
+    reg  [39:0] eng;                    // 本频段能量（求和与 log 分两拍算）
     localparam [2:0] S_IDLE = 3'd0,
                      S_UA   = 3'd1,      // 取系数、发乘法
                      S_UB   = 3'd2,      // 用乘法结果更新并旋转
                      S_PA   = 3'd3,      // 块结束：算 s1^2 / s2^2 / coef*s1
                      S_PC   = 3'd5,      // 块结束：算 coef*s1*s2
-                     S_PB   = 3'd4;      // 块结束：求和、压对数、清零
+                     S_PB   = 3'd4,      // 块结束：求和
+                     S_PD   = 3'd6;      // 块结束：压对数、清零（与求和分开，砍时序）
 
     reg [2:0]  st;
     reg [4:0]  bi;                 // 当前处理的频段
@@ -343,8 +441,14 @@ module spectrum #(
                 end
 
                 S_PB: begin
-                    mag[bi] <= (xacc == 24'd0) ? 8'd0
-                             : log8(mu1 + mu2 - ((mu4 + 40'sd8192) >>> 14));
+                    // 40 位求和单独一拍：mu4 -> 加法 -> eng 寄存器（原来和 log8
+                    // 挤在一拍里，TD 报 clk_pix 26.8ns > 26.67ns 预算）
+                    eng <= mu1 + mu2 - ((mu4 + 40'sd8192) >>> 14);
+                    st  <= S_PD;
+                end
+
+                S_PD: begin
+                    mag[bi] <= (xacc == 24'd0) ? 8'd0 : log8(eng);
                     for (k = 0; k < NB-1; k = k + 1) begin
                         s1[k] <= s1[k+1];
                         s2[k] <= s2[k+1];

@@ -38,13 +38,10 @@ module top_board #(
     parameter integer VBP     = 20,
     parameter integer VFP     = 5,
     // SD 卡上的图片布局（裸扇区，PC 端用 tools/make_sd_image.py 生成镜像）
-    parameter integer SEC_BASE   = 2048,      // 第 0 张图起始扇区（1MB 偏移）
-    parameter integer SEC_STRIDE = 5408,      // 每张图占的扇区（按最大那张 1280x720 算）
-    parameter integer IMG_NUM    = 3,         // 循环张数（图片资源/ 里的 BMP 数）
+    // 图片数量不再写死：FAT32 根目录里有多少张 BMP 就循环多少张（上限 56）
     // 音乐区（tools/make_sd_image.py 会打印这三个数）
     // 音乐区布局由卡上的「目录扇区」给出，RTL 里不再写死 base/stride
-    parameter integer MUS_DIR_SEC = 1024,     // 音乐目录扇区（tools/make_sd_image.py 写）
-    parameter integer MUS_NUM     = 2,        // 曲目数（只用于菜单上限）
+    // 曲目数同样由 FAT32 目录决定（上限 6，菜单一页放得下）
     parameter integer HOLD_FRM   = 90,        // 每张停留帧数（30fps 下 3 秒）
     // 双缓冲开关：1 = 双缓冲（换图/淡入淡出转场必须用它）；0 = 单缓冲（换图黑一下）
     //   ★ 2026-10-25：从 0 改回 1。
@@ -213,7 +210,9 @@ module top_board #(
     wire [1:0]  dbg_scale;          // 菜单里选的缩放档位（给 bmp_scale）
     wire [3:0]  dbg_vol;            // 菜单音量 0..10
     wire [2:0]  dbg_mus;            // 菜单 MUS：0=关 1=内置 2..=SD 曲目
-    wire        dbg_auto;           // 1=自动轮播
+    wire        dbg_auto;
+    wire [2:0]  dbg_hold;
+    wire        dbg_style;           // 1=自动轮播
     wire        nav_next, nav_prev;  // 非菜单态下 KEY1/KEY2：下一张/上一张
     wire        aud_valid;          // 音频采样有效（给频谱）
     wire [23:0] aud_left, aud_right; // 音频输出（24bit）
@@ -226,23 +225,23 @@ module top_board #(
 
     // ------------------------------------------------------------------
     // 擦除/推入式转场（菜单 SLIDE / WIPE）
-    //   frame_buffer 按"字索引"选 bank：rd_cnt < rd_wipe 读 rd_bank，否则读 rd_bank_new。
-    //   每帧把分界挪 15360 字（= 48 行），11 帧走完，两张图同屏共存、没有黑场。
-    //   分界恒为 4 字对齐（153600 / 15360 / 320 都能被 4 整除），
-    //   所以 4 字 burst 绝不会跨 bank。
+    //   frame_buffer 按"显示行号"选 bank：rout < rd_wipe 读 rd_bank，否则读 rd_bank_new。
+    //   每帧把分界挪 60 行，12 帧走完（约 0.4s），两张图同屏共存、没有黑场。
+    //   整行切换，4 字 burst 绝不会跨 bank。
     // ------------------------------------------------------------------
     reg         rd_bank_new;        // 新图所在的 bank
-    reg  [19:0] rd_wipe;            // 分界（字索引）；153600 = 全读 rd_bank
+    reg  [19:0] rd_wipe;            // 分界（显示行号）；720 = 全读 rd_bank
     reg         wipe_dir;           // 0 = SLIDE 新图从下往上推；1 = WIPE 新图从上往下覆盖
     reg  [3:0]  wipe_frm;           // 已走的帧数（兼作看门狗）
 
-    // 图片区在屏幕上的位置（与 frame_buffer 的 IMG_X0/IMG_Y0 保持一致）
-    localparam integer IMG_X0 = 320;
-    localparam integer IMG_Y0 = 120;
+    // 图片铺满整个活动区（960x540 存储，显示时 4:3 上采样到 1280x720）
+    localparam integer IMG_X0 = 0;
+    localparam integer IMG_Y0 = 0;
     localparam integer V_OFF  = 25;                  // VSA+VBP，与 frame_buffer 一致
 
     // 写侧数据源：BMP 解码 -> 自适应缩放 -> 帧缓存
     wire        sc_we;
+    wire        sc_busy;
     wire [11:0] sc_x, sc_y;
     wire [15:0] sc_rgb;
     wire [2:0]  sc_k;
@@ -251,8 +250,8 @@ module top_board #(
 
     frame_buffer #(
         .FB_W(1280), .FB_H(720), .VACTIVE(720),
-        .WR_LINES(25), .V_OFFSET(V_OFF),
-        .IMG_W(640), .IMG_H(480), .IMG_X0(IMG_X0), .IMG_Y0(IMG_Y0)
+        .WR_LINES(16), .V_OFFSET(V_OFF),
+        .SW(960), .SH(540)
     ) u_fb (
         .app_wr_addr  (fb_wr_addr),
         .app_wr_din   (fb_wr_din),
@@ -271,8 +270,8 @@ module top_board #(
         .pix_clk (clk_pix),
         .pix_rst (~rst_n),
         .wr_en   (sc_we),
-        .wr_x    (IMG_X0 + sc_x),
-        .wr_y    (IMG_Y0 + sc_y),
+        .wr_x    (sc_x),
+        .wr_y    (sc_y),
         .wr_rgb  (sc_rgb),
         .wr_buf  (1'b0),
         .wr_ready(fb_rdy),
@@ -295,17 +294,13 @@ module top_board #(
     );
 
     // ------------------------------------------------------------------
-    // SD 卡：SPI 控制器（25MHz）
+    // SD 卡：SPI 控制器（25MHz）+ FAT32
+    //   三个使用者：A 音频（最优先）/ B 图片 / C FAT 挂载与扫描
     // ------------------------------------------------------------------
     wire        sd_init_done, sd_rd_busy, sd_rd_val_en, sd_rd_start_en;
     wire [31:0] sd_rd_sec_addr;
     wire [15:0] sd_rd_val_data;
 
-    // ------------------------------------------------------------------
-    // SD 总线仲裁：音频优先（连续播放），图片等待（按扇区让路）
-    //   sd_ctrl_top 只有一个读口，两个人必须分时；
-    //   各自看到"被门控过"的 busy/val/data，否则会误收别人的数据。
-    // ------------------------------------------------------------------
     wire        arb_start, arb_busy, arb_val;
     wire [31:0] arb_sec;
     wire [15:0] arb_data;
@@ -318,9 +313,47 @@ module top_board #(
     wire        img_busy, img_val, img_gnt;
     wire [15:0] img_data;
 
+    wire        scan_busy, scan_val, scan_gnt;
+    wire [15:0] scan_data;
+
+    // FAT 挂载 / 扫描的扇区请求（共用仲裁器 C 口）
+    wire [2:0]  mnt_st;
+    wire [3:0]  scan_st;
+    wire        mnt_rd_start, scan_rd_start;
+    wire [31:0] mnt_rd_sec, scan_rd_sec;
+
+    // ------------------------------------------------------------------
+    // SD 上电时序：init_done 会把 sd_clk 从 400kHz 切到 25MHz，而且卡在
+    // ACMD41 之后还需要一点时间才接受 CMD17。
+    // 旧版本第一次读卡在"清屏"之后（约 300ms），FAT 挂载却是 init_done
+    // 的第一个周期就发命令 —— 卡一旦丢掉这条命令，sd_read 里没有超时，
+    // rd_busy 永远不落，整个 SD 链路就死了（上板现象：数码管 01、黑屏）。
+    // 旧版本第一次读卡在"清屏"之后（约 1s），这里统一等 ~671ms 再放行；
+    // sd_reinit 时一起复位重来。
+    // ------------------------------------------------------------------
+    reg [23:0] sd_settle;
+    always @(posedge clk_sd or negedge rst_n) begin
+        if (!rst_n)                       sd_settle <= 24'd0;
+        else if (!sd_init_done)           sd_settle <= 24'd0;
+        else if (sd_settle != 24'hFFFFFF) sd_settle <= sd_settle + 24'd1;
+    end
+    wire sd_bus_ok = sd_init_done & (sd_settle == 24'hFFFFFF);
+
+    // SD 子系统软复位（上电卡死时整段重来，见下面的 watchdog）
+    //   复位是异步的，但"释放"要同步到 25MHz 域，避免恢复时间违例
+    reg        sd_reinit;
+    wire       sd_rst_n = rst_n & ~sd_reinit;
+
+    reg [1:0]  sd_rst_sync;
+    always @(posedge clk_sd or negedge rst_n) begin
+        if (!rst_n) sd_rst_sync <= 2'b00;
+        else        sd_rst_sync <= {sd_rst_sync[0], sd_rst_n};
+    end
+    wire sd_rst_n_s = sd_rst_sync[1];
+
     sd_ctrl_top u_sd (
         .clk_ref      (clk_sd),
-        .rst_n        (rst_n),
+        .rst_n        (sd_rst_n_s),
 
         .sd_miso      (sd_miso),
         .sd_clk       (sd_clk),
@@ -337,18 +370,105 @@ module top_board #(
     );
 
     sd_arb u_arb (
-        .clk(clk_sd), .rst_n(rst_n),
+        .clk(clk_sd), .rst_n(sd_rst_n_s),
         .a_req(wav_req), .a_sec(wav_sec),
         .a_busy(wav_busy), .a_val(wav_val), .a_data(wav_data), .a_gnt(wav_gnt),
         .b_req(sd_rd_start_en), .b_sec(sd_rd_sec_addr),
         .b_busy(img_busy), .b_val(img_val), .b_data(img_data), .b_gnt(img_gnt),
+        .c_req(mnt_rd_start | scan_rd_start),
+        .c_sec(mnt_rd_start ? mnt_rd_sec : scan_rd_sec),
+        .c_busy(scan_busy), .c_val(scan_val), .c_data(scan_data), .c_gnt(scan_gnt),
         .s_start(arb_start), .s_sec(arb_sec),
         .s_busy(arb_busy), .s_val(arb_val), .s_data(arb_data),
-        .sd_init_done(sd_init_done)
+        .sd_init_done(sd_bus_ok)
     );
 
     // ------------------------------------------------------------------
-    // 扇区连续读 + 字节流
+    // FAT32：挂载 -> 目录扫描 -> 文件表
+    //   挂载和扫描共用仲裁器 C 口（两者严格先后，不会同时发请求）
+    // ------------------------------------------------------------------
+    wire        mnt_rd_busy, mnt_rd_val;
+    wire [15:0] mnt_rd_data;
+    wire        mnt_ok, mnt_done;
+    wire [31:0] part_lba, fat_lba, data_lba, root_clus;
+    wire [3:0]  spc_log2;
+    wire [7:0]  mnt_err;
+
+    fat_mnt u_mnt (
+        .clk         (clk_sd),
+        .rst         (~sd_rst_n_s),
+        .rd_start_en (mnt_rd_start),
+        .rd_sec_addr (mnt_rd_sec),
+        .rd_busy     (scan_busy),
+        .rd_val_en   (scan_val),
+        .rd_val_data (scan_data),
+        .sd_init_done(sd_bus_ok),
+        .mnt_ok      (mnt_ok),
+        .part_lba    (part_lba),
+        .fat_lba     (fat_lba),
+        .data_lba    (data_lba),
+        .spc_log2    (spc_log2),
+        .root_clus   (root_clus),
+        .mnt_done    (mnt_done),
+        .mnt_err     (mnt_err),
+        .dbg_st      (mnt_st)
+    );
+
+    wire        scan_done;
+    wire [7:0]  img_total_s;
+    wire [3:0]  mus_total_s;
+    wire [7:0]  scan_err;
+    wire        tbl_wr_en;
+    wire [9:0]  tbl_wr_addr;
+    wire [7:0]  tbl_wr_data;
+
+    fat_scan #(.IMG_MAX(56), .MUS_MAX(6)) u_scan (
+        .clk         (clk_sd),
+        .rst         (~sd_rst_n_s),
+        .rd_start_en (scan_rd_start),
+        .rd_sec_addr (scan_rd_sec),
+        .rd_busy     (scan_busy),
+        .rd_val_en   (scan_val),
+        .rd_val_data (scan_data),
+        .sd_init_done(sd_bus_ok),
+        .mnt_ok      (mnt_ok),
+        .mnt_done    (mnt_done),
+        .fat_lba     (fat_lba),
+        .data_lba    (data_lba),
+        .spc_log2    (spc_log2),
+        .root_clus   (root_clus),
+        .tw_en       (tbl_wr_en),
+        .tw_addr     (tbl_wr_addr),
+        .tw_data     (tbl_wr_data),
+        .img_total   (img_total_s),
+        .mus_total   (mus_total_s),
+        .scan_done   (scan_done),
+        .scan_err    (scan_err),
+        .dbg_st      (scan_st)
+    );
+
+    // 文件表：图片读器 + 音频播放器共用
+    wire        img_tbl_req, img_tbl_done;
+    wire [5:0]  img_tbl_rec;
+    wire [127:0] img_tbl_data;
+    wire        mus_tbl_req, mus_tbl_done;
+    wire [5:0]  mus_tbl_rec;
+    wire [127:0] mus_tbl_data;
+
+    fat_tbl u_tbl (
+        .clk    (clk_sd),
+        .rst    (~rst_n),
+        .wr_en  (tbl_wr_en),
+        .wr_addr(tbl_wr_addr),
+        .wr_data(tbl_wr_data),
+        .i_req  (img_tbl_req), .i_rec(img_tbl_rec),
+        .i_done (img_tbl_done), .i_data(img_tbl_data),
+        .m_req  (mus_tbl_req), .m_rec(mus_tbl_rec),
+        .m_done (mus_tbl_done), .m_data(mus_tbl_data)
+    );
+
+    // ------------------------------------------------------------------
+    // 图片读器（按簇链）
     // ------------------------------------------------------------------
     wire [7:0] sd_byte;
     wire       sd_byte_vld;
@@ -359,9 +479,7 @@ module top_board #(
     wire       rdr_done;
     wire       bmp_eof;            // 解码器已收满 bfSize（让读取器提前收工）
 
-    sd_bmp_reader #(
-        .SEC_BASE(SEC_BASE), .SEC_STRIDE(SEC_STRIDE), .SEC_NUM(SEC_STRIDE)
-    ) u_rdr (
+    sd_bmp_reader u_rdr (
         .clk          (clk_sd),
         .rst          (~rst_n),
 
@@ -371,6 +489,15 @@ module top_board #(
         .rd_val_en    (img_val),
         .rd_val_data  (img_data),
         .sd_init_done (sd_init_done),
+
+        .fat_lba      (fat_lba),
+        .data_lba     (data_lba),
+        .spc_log2     (spc_log2),
+
+        .tbl_req      (img_tbl_req),
+        .tbl_rec      (img_tbl_rec),
+        .tbl_done     (img_tbl_done),
+        .tbl_data     (img_tbl_data),
 
         .enable       (rd_en),
         .img_idx      (img_idx),
@@ -395,7 +522,9 @@ module top_board #(
     );
 
     // afifo 是寄存器输出：读一次出一拍，rd_valid 期间不再读
-    assign sfifo_rd = ~sfifo_empty & ~sfifo_rvld;
+    // ★ 反压：缩放器/帧缓存忙时停止取字节。
+    //   字节停了，bmp_decode 就不会再吐像素，像素不会被静默丢掉。
+    assign sfifo_rd = ~sfifo_empty & ~sfifo_rvld & ~sc_busy;
 
     // ------------------------------------------------------------------
     // BMP 解码（像素域）
@@ -439,8 +568,8 @@ module top_board #(
         .o_hdr_ok   ()
     );
 
-    // 自适应缩放：任意分辨率的图 -> 640x480 框内（2^k 缩小 + 居中）
-    bmp_scale #(.DW(640), .DH(480)) u_scale (
+    // 自适应缩放：任意分辨率的图 -> 960x540（1280x720 走精确 3/4 抽取）
+    bmp_scale #(.DW(960), .DH(540)) u_scale (
         .clk      (clk_pix),
         .rst      (~rst_n),
 
@@ -461,8 +590,39 @@ module top_board #(
         .o_x      (sc_x),
         .o_y      (sc_y),
         .o_rgb    (sc_rgb),
-        .o_k      (sc_k)
+        .o_k      (sc_k),
+        .o_busy   (sc_busy)
     );
+
+    // ------------------------------------------------------------------
+    // FAT 扫描结果 -> 像素域
+    //   这些值在挂载/扫描结束后就不再变，逐位两级同步即可
+    // ------------------------------------------------------------------
+    reg [7:0]  tot_s1, tot_s2;
+    reg [3:0]  mst_s1, mst_s2;
+    reg        sdn_s1, sdn_s2;
+    reg [63:0] nm_s1,  nm_s2;
+    wire [63:0] wav_trk_name;
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin
+            tot_s1 <= 8'd0; tot_s2 <= 8'd0;
+            mst_s1 <= 4'd0; mst_s2 <= 4'd0;
+            sdn_s1 <= 1'b0; sdn_s2 <= 1'b0;
+            nm_s1  <= 64'd0; nm_s2 <= 64'd0;
+        end else begin
+            tot_s1 <= img_total_s;  tot_s2 <= tot_s1;
+            mst_s1 <= mus_total_s;  mst_s2 <= mst_s1;
+            sdn_s1 <= scan_done;    sdn_s2 <= sdn_s1;
+            nm_s1  <= wav_trk_name; nm_s2  <= nm_s1;
+        end
+    end
+
+    wire [7:0]  img_total_p = tot_s2;
+    wire [3:0]  mus_total_p = mst_s2;
+    wire        scan_done_p = sdn_s2;
+    wire [63:0] mus_name_p  = nm_s2;
+
 
     // ------------------------------------------------------------------
     // 轮播状态机（像素域）
@@ -485,16 +645,32 @@ module top_board #(
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
     reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
     reg [15:0] hold_frm;
+
+    // 菜单"切屏间隔"档位 -> 帧数（30fps）：3/5/8/15/30 秒
+    wire [15:0] hold_lim = (dbg_hold == 3'd0) ? 16'd90  :
+                           (dbg_hold == 3'd1) ? 16'd150 :
+                           (dbg_hold == 3'd2) ? 16'd240 :
+                           (dbg_hold == 3'd3) ? 16'd450 : 16'd900;
     reg [1:0]  sdi_sync;
     reg        done_s1, done_s2;
 
     wire sd_ready   = sdi_sync[1];
+
+    // 开机看门狗：SD 一直没就绪（没插卡/卡坏）也在屏幕上给个提示，
+    // 不要只留一块黑屏
+    reg [25:0] boot_cnt;
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) boot_cnt <= 26'd0;
+        else if (!sd_ready && (boot_cnt != 26'h3FFFFFF)) boot_cnt <= boot_cnt + 26'd1;
+    end
+    wire boot_tmo = boot_cnt[25];        // 约 0.9s @37.5MHz
+
+    wire media_alert = (scan_done_p && (img_total_p == 8'd0)) || (~sd_ready && boot_tmo);
     wire rdr_done_p = done_s2;
 
-    // 当前这一行是不是"图片行"（帧内行号 145..624）。
+    // 当前这一行是不是"图片行"（帧内行号 25..744，图片已铺满活动区）。
     // 换 bank 必须避开这段：否则本帧上面还是旧图、下面已经换成新图。
-    wire in_img_row = (raw_y >= (IMG_Y0 + V_OFF)) &&
-                      (raw_y <  (IMG_Y0 + V_OFF + 480));
+    wire in_img_row = (raw_y >= V_OFF) && (raw_y < (V_OFF + 720));
 
     // 写侧排空标志跨到像素域（mem 125MHz -> pix 37.5MHz）
     reg  [1:0] widle_sync;
@@ -534,7 +710,7 @@ module top_board #(
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
             rd_bank_new <= 1'b0;
-            rd_wipe   <= 20'd153600;
+            rd_wipe   <= 20'd720;
             wipe_dir  <= 1'b0;
             wipe_frm  <= 4'd0;
             fade_lvl  <= 8'd255;
@@ -548,7 +724,7 @@ module top_board #(
 
             case (ld_st)
                 LD_WAIT: begin
-                    if (sd_ready) begin
+                    if (sd_ready && scan_done_p && (img_total_p != 8'd0)) begin
                         sc_clr   <= 1'b1;     // 先清屏，再开始读图
                         clr_ok   <= 1'b0;
                         clr_wdog <= 26'd0;
@@ -631,7 +807,7 @@ module top_board #(
                                 rd_bank     <= USE_DBL[0] ? wr_bank : 1'b0;
                                 wr_bank     <= USE_DBL[0] ? ~wr_bank : 1'b0;
                                 rd_bank_new <= USE_DBL[0] ? wr_bank : 1'b0;
-                                rd_wipe     <= 20'd153600;
+                                rd_wipe     <= 20'd720;
                                 fade_lvl    <= 8'd255;
                                 ld_st       <= LD_SHOW;
                             end else if (!USE_DBL[0]) begin
@@ -639,7 +815,7 @@ module top_board #(
                                 rd_bank     <= 1'b0;
                                 wr_bank     <= 1'b0;
                                 rd_bank_new <= 1'b0;
-                                rd_wipe     <= 20'd153600;
+                                rd_wipe     <= 20'd720;
                                 fade_lvl    <= 8'd255;
                                 ld_st       <= LD_SHOW;
                             end else begin
@@ -647,12 +823,12 @@ module top_board #(
                                     2'd0: begin      // FADE
                                         fade_lvl <= 8'd255;
                                         rd_bank_new <= wr_bank;
-                                        rd_wipe     <= 20'd153600;
+                                        rd_wipe     <= 20'd720;
                                         ld_st       <= LD_FADE_OUT;
                                     end
                                     2'd1: begin      // SLIDE：新图从下往上推
                                         rd_bank_new <= wr_bank;      // 新图
-                                        rd_wipe     <= 20'd153600;   // 先全读旧图
+                                        rd_wipe     <= 20'd720;   // 先全读旧图
                                         wipe_dir    <= 1'b0;
                                         wipe_frm    <= 4'd0;
                                         fade_lvl    <= 8'd255;
@@ -672,7 +848,7 @@ module top_board #(
                                     default: begin   // CUT：硬切
                                         rd_bank     <= wr_bank;
                                         rd_bank_new <= wr_bank;
-                                        rd_wipe     <= 20'd153600;
+                                        rd_wipe     <= 20'd720;
                                         wr_bank     <= ~wr_bank;
                                         fade_lvl    <= 8'd255;
                                         ld_st       <= LD_SHOW;
@@ -727,7 +903,7 @@ module top_board #(
                     if (frame_top) begin
                         if (wipe_frm >= 4'd13) begin
                             // 看门狗：无论什么情况，13 帧内必定收尾，不会卡死
-                            rd_wipe     <= 20'd153600;
+                            rd_wipe     <= 20'd720;
                             rd_bank     <= wipe_dir ? rd_bank : rd_bank_new;
                             rd_bank_new <= wipe_dir ? rd_bank : rd_bank_new;
                             wr_bank     <= ~(wipe_dir ? rd_bank : rd_bank_new);
@@ -745,24 +921,24 @@ module top_board #(
                                     wipe_frm    <= 4'd0;
                                     hold_frm    <= 16'd0;
                                     ld_st       <= LD_SHOW;
-                                end else if (rd_wipe <= 20'd15360) begin
+                                end else if (rd_wipe <= 20'd60) begin
                                     rd_wipe <= 20'd0;
                                 end else begin
-                                    rd_wipe <= rd_wipe - 20'd15360;
+                                    rd_wipe <= rd_wipe - 20'd60;
                                 end
                             end else begin
-                                if (rd_wipe >= 20'd153600) begin
+                                if (rd_wipe >= 20'd720) begin
                                     rd_bank     <= rd_bank;      // WIPE 里 rd_bank 已经是新图
                                     rd_bank_new <= rd_bank;
                                     wr_bank     <= ~rd_bank;
-                                    rd_wipe     <= 20'd153600;
+                                    rd_wipe     <= 20'd720;
                                     wipe_frm    <= 4'd0;
                                     hold_frm    <= 16'd0;
                                     ld_st       <= LD_SHOW;
-                                end else if (rd_wipe >= 20'd138240) begin
-                                    rd_wipe <= 20'd153600;
+                                end else if (rd_wipe >= 20'd660) begin
+                                    rd_wipe <= 20'd720;
                                 end else begin
-                                    rd_wipe <= rd_wipe + 20'd15360;
+                                    rd_wipe <= rd_wipe + 20'd60;
                                 end
                             end
                         end
@@ -773,7 +949,7 @@ module top_board #(
                     if (fade_lvl != 8'd255) fade_lvl <= 8'd255;
                     // 正常显示期间强制"不分界"：任何残留的 rd_wipe/rd_bank_new
                     // 都会让下半帧从另一块 bank 取数（那正是"横缝 + 下半重复"的成因）
-                    rd_wipe     <= 20'd153600;
+                    rd_wipe     <= 20'd720;
                     rd_bank_new <= rd_bank;
                     // 手动切图（KEY1/KEY2）优先；自动轮播要菜单里开着才走
                     if (frame_top && dbg_auto) hold_frm <= hold_frm + 16'd1;
@@ -791,13 +967,13 @@ module top_board #(
                         hold_frm  <= 16'd0;
                         ld_st     <= LD_CLEAR;
                     end else if (nav_next || nav_prev ||
-                                 (dbg_auto && (hold_frm >= HOLD_FRM[15:0]))) begin
+                                 (dbg_auto && (hold_frm >= hold_lim))) begin
                         // 下一张 / 上一张 / 自动轮播到点
                         if (nav_prev)
-                            img_idx <= (img_idx == 8'd0) ? (IMG_NUM[7:0] - 8'd1)
+                            img_idx <= (img_idx == 8'd0) ? (img_total_p - 8'd1)
                                                          : (img_idx - 8'd1);
                         else
-                            img_idx <= (img_idx >= IMG_NUM[7:0] - 8'd1) ? 8'd0
+                            img_idx <= (img_idx + 8'd1 >= img_total_p) ? 8'd0
                                                                         : (img_idx + 8'd1);
                         scale_d   <= dbg_scale;
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
@@ -834,8 +1010,61 @@ module top_board #(
     //         1=WAIT 3=CLEAR 5=ARM 7=LOAD 9=SHOW（sd_ready=1 时都是奇数）
     wire        trk_bad;           // 曲目头不是 RIFF（SD 卡镜像/参数不匹配）
     wire [15:0] wav_hdr;           // 曲目首扇区第一个字（调试显示）
-    // 最高位段显示 F = 音乐区头校验失败（卡没按当前镜像重写）
-    wire [7:0]  dbg_ext = { trk_bad ? 4'hF : drop_cnt, ld_st, sd_ready};
+    // ------------------------------------------------------------------
+    // SD 兜底重启
+    //   上电后一直停在 LD_WAIT（挂载/扫描没走完），或单次传输卡住 >335ms，
+    //   就把 sd_ctrl_top / sd_arb / fat_mnt / fat_scan 整段复位重来。
+    //   只在 LD_WAIT（还没装过第一张图）时动手，不会打断正在读图的过程。
+    //   最多重试 3 次；之后保持现状，数码管上能看到卡在哪一步。
+    // ------------------------------------------------------------------
+    reg [22:0] sbusy_tmr;
+    always @(posedge clk_sd or negedge rst_n) begin
+        if (!rst_n)                       sbusy_tmr <= 23'd0;
+        else if (!arb_busy)               sbusy_tmr <= 23'd0;
+        else if (sbusy_tmr != 23'h7FFFFF) sbusy_tmr <= sbusy_tmr + 23'd1;
+    end
+    wire sd_bus_stuck = (sbusy_tmr == 23'h7FFFFF);   // 335ms
+
+    reg [26:0] boot_tmr;
+    reg [1:0]  sd_retry;
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin
+            boot_tmr  <= 27'd0;
+            sd_retry  <= 2'd0;
+            sd_reinit <= 1'b0;
+        end else if (sd_reinit) begin
+            // 复位保持约 1.4ms 再放，让 sd_init 从 CMD0 重新走
+            if (boot_tmr != 27'h1FFFF) boot_tmr <= boot_tmr + 27'd1;
+            else begin
+                boot_tmr  <= 27'd0;
+                sd_reinit <= 1'b0;
+            end
+        end else if (ld_st != LD_WAIT) begin
+            boot_tmr <= 27'd0;
+        end else if (sd_bus_stuck) begin
+            if (sd_retry != 2'd3) begin
+                sd_retry  <= sd_retry + 2'd1;
+                sd_reinit <= 1'b1;
+                boot_tmr  <= 27'd0;
+            end
+        end else if (boot_tmr != 27'h5FFFFFF) begin
+            boot_tmr <= boot_tmr + 27'd1;            // 约 2.7s
+        end else if (sd_retry != 2'd3) begin
+            sd_retry  <= sd_retry + 2'd1;
+            sd_reinit <= 1'b1;
+            boot_tmr  <= 27'd0;
+        end
+    end
+
+    // 数码管（左->右）：图片数 | {ld_st,sd_ready} | mnt_st | scan_st | 0 0
+    //   正常:  3 9 0 8 0 0   （3 张图 / SHOW / 挂载完 / 扫描完）
+    //   卡在挂载: 0 1 1 3 0 0 （S_M0 / S_RCV）
+    //   扫描错:  F 3 ...    挂载错: E 1 ...
+    wire [15:0] dbg_ext = (scan_err != 8'd0) ? {4'hF, scan_err, 8'h00}
+                        : (mnt_err  != 8'd0) ? {4'hE, mnt_err, 8'h00}
+                        : { img_total_p[3:0], ld_st, sd_ready,
+                            1'b0, mnt_st, scan_st };
 
     wire        menu_open;
     wire [2:0]  dbg_item;
@@ -845,11 +1074,11 @@ module top_board #(
     top_osd_demo #(
         .HACTIVE(HACTIVE), .HTOTAL(HTOTAL), .HSA(HSA), .HBP(HBP), .HFP(HFP),
         .VACTIVE(VACTIVE), .VTOTAL(VTOTAL), .VSA(VSA), .VBP(VBP), .VFP(VFP),
-        .PX0(360), .PY0(80), .PW(560), .PH(560),
+        .PX0(340), .PY0(30), .PW(600), .PH(660),
         .HOLD_FRAMES(75),
         .KEY_CLK_HZ(37_500_000),
         .USE_EXT(1),
-        .MUS_NUM(MUS_NUM)
+        .MUS_NUM(6)
     ) u_core (
         .clk(clk_pix), .rst_n(rst_n),
         // 按键重新分配（贴合"音乐相框"的用法）：
@@ -862,6 +1091,7 @@ module top_board #(
         .dbg_prog(dbg_prog), .dbg_effect(dbg_effect), .dbg_scale(dbg_scale),
         .dbg_vol(dbg_vol),
         .dbg_mus(dbg_mus), .dbg_auto(dbg_auto),
+        .dbg_hold(dbg_hold), .dbg_style(dbg_style),
         .nav_next(nav_next), .nav_prev(nav_prev),
         .seg_sel(seg_sel), .seg_data(seg_data),
         .img_changed(img_changed),
@@ -870,7 +1100,9 @@ module top_board #(
         .raw_de(raw_de), .raw_x(raw_x), .raw_y(raw_y),
         .dbg_ext(dbg_ext), .dbg_hdr(wav_hdr),
         .aud_samp(aud_left[23:8]), .aud_samp_v(aud_valid),
-        .aud_meter_en(1'b1)          // 音频电平表常开（想关掉改 0）
+        .aud_meter_en(1'b1),         // 总开关；实际显示由菜单 VU（默认 OFF）控制
+        .mus_total(mus_total_p), .mus_name(mus_name_p),
+        .media_alert(media_alert)
     );
 
     // ------------------------------------------------------------------
@@ -930,7 +1162,7 @@ module top_board #(
     wire [2:0] wav_trk = (dbg_mus >= 3'd2) ? (dbg_mus - 3'd1) : 3'd0;
 
     wav_player #(
-        .DIR_SEC(MUS_DIR_SEC), .TRK_NUM(MUS_NUM),
+        .TRK_NUM(6),
         .CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)
     ) u_wav (
         .clk     (clk_pix),
@@ -938,6 +1170,13 @@ module top_board #(
         .rst     (~rst_n),
         .track   (wav_trk),
         .vol     (dbg_vol),
+        .fat_lba (fat_lba),
+        .data_lba(data_lba),
+        .spc_log2(spc_log2),
+        .tbl_req (mus_tbl_req),
+        .tbl_rec (mus_tbl_rec),
+        .tbl_done(mus_tbl_done),
+        .tbl_data(mus_tbl_data),
         .s_req   (wav_req),
         .s_sec   (wav_sec),
         .s_busy  (wav_busy),
@@ -947,7 +1186,9 @@ module top_board #(
         .aud_left (wav_l),
         .aud_right(wav_r),
         .level    (wav_lvl),
-        .trk_bad  (trk_bad), .dbg_hdr(wav_hdr)
+        .trk_bad  (trk_bad),
+        .trk_name (wav_trk_name),
+        .dbg_hdr  (wav_hdr)
     );
 
     // 音源选择：有 WAV 曲目就放 WAV，否则放内置音阶

@@ -22,10 +22,10 @@ module top_osd_demo #(
     parameter integer VSA     = 5,
     parameter integer VBP     = 20,
     parameter integer VFP     = 5,
-    parameter integer PX0     = 360,
-    parameter integer PY0     = 110,
-    parameter integer PW      = 560,
-    parameter integer PH      = 500,
+    parameter integer PX0     = 340,
+    parameter integer PY0     = 30,
+    parameter integer PW      = 600,
+    parameter integer PH      = 660,
     parameter integer HOLD_FRAMES = 150,        // 每张停留帧数
     parameter integer KEY_CLK_HZ  = 75_000_000, // 仅仿真时调小以加速
     parameter integer USE_EXT     = 0,          // 1=A 路视频改用外部输入（SDRAM 图）
@@ -51,6 +51,8 @@ module top_osd_demo #(
     output wire [3:0]  dbg_vol,      // 菜单音量 0..10（给 tone_gen）
     output wire [2:0]  dbg_mus,      // 菜单 MUS：0=关 1=内置 2..=SD 曲目
     output wire        dbg_auto,     // 1=自动轮播
+    output wire [2:0]  dbg_hold,     // 切屏间隔档位
+    output wire        dbg_style,    // 0=条形 1=圆形
     output wire        nav_next,     // KEY1（非菜单态）：下一张
     output wire        nav_prev,     // KEY2（非菜单态）：上一张
 
@@ -63,11 +65,14 @@ module top_osd_demo #(
     output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
     output wire [11:0] raw_x,
     output wire [11:0] raw_y,        // 帧内行号 0..VTOTAL-1
-    input  wire [7:0]  dbg_ext,      // 调试字（SD/轮播状态），显示在数码管
+    input  wire [15:0] dbg_ext,      // 调试字（4 个半字节，显示在数码管）
     input  wire [15:0] dbg_hdr,      // 曲目首扇区第一个 16bit 字（trk_bad 时显示）
     input  wire signed [15:0] aud_samp,  // 48kHz 采样（给频谱分析）
     input  wire        aud_samp_v,       // 采样有效
-    input  wire        aud_meter_en      // 1 = 显示频谱
+    input  wire        aud_meter_en,     // 1 = 显示频谱
+    input  wire [3:0]  mus_total,        // FAT 目录里的 WAV 数量（0..6）
+    input  wire [63:0] mus_name,         // 当前曲目 8.3 名字
+    input  wire        media_alert       // 1 = 没有可用图片
 );
 
     wire rst = ~rst_n;
@@ -127,7 +132,8 @@ module top_osd_demo #(
     wire [1:0]  cfg_trans;
     wire [3:0]  cfg_bright, cfg_contrast, cfg_vol;
     wire [1:0]  cfg_scale;
-    wire [2:0]  cfg_mus; wire cfg_meter, cfg_auto, cfg_commit;
+    wire [2:0]  cfg_mus; wire cfg_meter, cfg_sub, cfg_auto, cfg_commit;
+    wire [2:0]  cfg_hold; wire cfg_style;
 
     osd_menu #(
         .HACTIVE(HACTIVE), .VACTIVE(VACTIVE),
@@ -147,7 +153,10 @@ module top_osd_demo #(
         .cfg_scale(cfg_scale), .cfg_mus(cfg_mus), .cfg_vol(cfg_vol),
         .cfg_auto(cfg_auto),
         .nav_next(nav_next), .nav_prev(nav_prev),
-        .cfg_meter(cfg_meter)
+        .cfg_meter(cfg_meter),
+        .cfg_sub(cfg_sub),
+        .cfg_hold(cfg_hold), .cfg_style(cfg_style),
+        .mus_total(mus_total), .mus_name(mus_name), .alert(media_alert)
     );
 
     // ------------------------------------------------------------------
@@ -159,6 +168,8 @@ module top_osd_demo #(
     wire [2:0] ef_mus;
     wire       ef_auto;
     wire       ef_meter;
+    wire [2:0] ef_hold;
+    wire       ef_style;
     wire [3:0] cfg_ver;
 
     cfg_latch u_cfg (
@@ -167,9 +178,10 @@ module top_osd_demo #(
         .in_scale(cfg_scale), .in_mus(cfg_mus), .in_vol(cfg_vol),
         .in_auto(cfg_auto),
         .in_meter(cfg_meter),
+        .in_hold(cfg_hold), .in_style(cfg_style),
         .trans(ef_trans), .bright(ef_bright), .contrast(ef_contrast),
         .scale(ef_scale), .mus(ef_mus), .vol(ef_vol), .meter(ef_meter),
-        .auto_en(ef_auto),
+        .auto_en(ef_auto), .hold(ef_hold), .style(ef_style),
         .ver(cfg_ver)
     );
 
@@ -321,9 +333,10 @@ module top_osd_demo #(
         .X0(128), .Y0(468), .BARW(32), .NBAR(32), .MAXH(112)
     ) u_meter (
         .clk(clk), .rst(rst),
-        .x(xd3), .y(yd3),              // 早一拍，模块内部寄存后与视频对齐
+        .x(xd1), .y(yd1),              // 早三拍，模块内部三级流水后与视频对齐
         .bars(spec_bars),
         .enable(aud_meter_en & ef_meter & ~menu_open),
+        .style(ef_style),
         .on(m_on), .rgb(m_rgb), .alpha(m_alpha)
     );
 
@@ -357,6 +370,8 @@ module top_osd_demo #(
     assign dbg_vol    = ef_vol;
     assign dbg_mus    = ef_mus;
     assign dbg_auto   = ef_auto;
+    assign dbg_hold   = ef_hold;
+    assign dbg_style  = ef_style;
 
     assign raw_de = bg_de;
     assign raw_x  = act_x;
@@ -366,15 +381,10 @@ module top_osd_demo #(
     seg7 #(.CLK_HZ(KEY_CLK_HZ)) u_seg (
         .clk     (clk),
         .rst_n   (rst_n),
-        // seg7 的 dsel=0 对应最左边一位，而它是 value[3:0]，
-        // 直接接 dbg_ext 会显示成左右颠倒（05 显示成 50），这里交换高低半字节
-        // trk_bad（dbg_ext[7:4]==F）时，数码管直接显示**音乐目录扇区（1024）的第一个字**：
-        //   444D = "MD"（正常，不该看到）
-        //   0000 = 目录扇区是空的 -> 卡上是旧镜像 / 没写进去
-        // 4 位数 + 尾随 FF 表示"异常"。
-        .value   ((dbg_ext[7:4] == 4'hF)
-                  ? {8'hFF, dbg_hdr[3:0], dbg_hdr[7:4], dbg_hdr[11:8], dbg_hdr[15:12]}
-                  : {16'd0, dbg_ext[3:0], dbg_ext[7:4]}),
+        // seg7 的 dsel=0 对应最左边一位，而取的是 value[3:0]，所以这里反着拼：
+        //   左->右 = 图片数 | {ld_st,sd_ready} | 挂载状态 | 扫描状态 | 0 | 0
+        //   正常: 3 9 0 8 0 0
+        .value   ({8'd0, dbg_ext[3:0], dbg_ext[7:4], dbg_ext[11:8], dbg_ext[15:12]}),
         .dp_mask ({menu_open, 5'b00000}),
         .seg_sel (seg_sel),
         .seg_data(seg_data)
