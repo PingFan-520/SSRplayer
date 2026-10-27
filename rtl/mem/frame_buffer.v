@@ -77,6 +77,7 @@ module frame_buffer #(
     output wire [8:0]  wr_fifo_used,   // 写 FIFO 已用字数（pix 域），给 SD 反压
     output wire        wr_idle,        // 写侧彻底排空（FIFO 空 + 无在途 burst）
     output wire        wr_drop,        // 本拍有像素因写 FIFO 满而丢失（诊断用）
+    output wire [7:0]  rd_drop_cnt,    // 读通路丢字计数（饱和）：非 0 就会纵向错行
     output wire [15:0] rgb_out,
     output wire        de_out
 );
@@ -338,8 +339,27 @@ module frame_buffer #(
         else         rf_used_r <= rf_used;
     end
 
+    // 读通路丢字计数：只统计"FIFO 真满了还回来数据"这种**会错行**的丢弃。
+    // 写窗口开头那几拍的在途数据虽然也被丢，但那时 FIFO 反正要清空、
+    // 行游标也要归零，不影响对齐，所以不计入。
+    // 数码管左两位能看到这个值，正常必须一直是 00。
+    reg [7:0] rdrop;
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem)                                 rdrop <= 8'd0;
+        else if (app_rd_valid & rf_full & ~wr_win_m)
+            rdrop <= (rdrop == 8'hFF) ? rdrop : rdrop + 8'd1;
+    end
+    assign rd_drop_cnt = rdrop;
+
+    // ★ 预灌门限从 2032 降到 1024（一半）。
+    //   原来只留 16 个字的余量：burst 在途 4 字 + rf_used 跨时钟同步滞后，
+    //   硬件上 SDRAM 刷新/仲裁一挤就会真的冲到 2048 满，而下面
+    //   "rf_wr <= app_rd_valid & ~rf_full" 会**静默丢掉**这个字。
+    //   丢掉 N 个字 -> 之后所有像素提前 N 个字 -> 整幅图纵向错 N/480 行，
+    //   而且每帧丢的个数不同 -> 上板看到的"整幅画面上下轻微跳动/错行"。
+    //   1024 字 ≈ 73us 的消耗量，读写带宽差 5 倍以上，留这么多完全够。
     wire rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                  (rf_used_r < 12'd2032) & ~rf_full & ~rburst & (rgap == 4'd0) &
+                  (rf_used_r < 12'd1024) & ~rf_full & ~rburst & (rgap == 4'd0) &
                   ~bsend & (wq == 6'd63);
 
     always @(posedge clk_mem or posedge rst_mem) begin

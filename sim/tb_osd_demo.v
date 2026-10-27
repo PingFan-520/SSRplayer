@@ -53,7 +53,7 @@ module tb_osd_demo;
         .img_changed(1'b0),
         .ext_rgb(16'd0),
         .raw_de(), .raw_x(), .raw_y(),
-        .dbg_ext(16'd0),
+        .dbg_ext(24'd0),
         .aud_samp(16'sd0), .aud_samp_v(1'b0), .aud_meter_en(1'b1),
         .mus_total(4'd3), .mus_name(64'h2020_3130_5453_4554), .media_alert(1'b0)
     );

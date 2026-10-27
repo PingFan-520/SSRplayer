@@ -65,7 +65,7 @@ module top_osd_demo #(
     output wire        raw_de,       // 未延迟的 de / 坐标，给帧缓存读侧用
     output wire [11:0] raw_x,
     output wire [11:0] raw_y,        // 帧内行号 0..VTOTAL-1
-    input  wire [15:0] dbg_ext,      // 调试字（4 个半字节，显示在数码管）
+    input  wire [23:0] dbg_ext,      // 调试字（6 个半字节，显示在数码管）
     input  wire [15:0] dbg_hdr,      // 曲目首扇区第一个 16bit 字（trk_bad 时显示）
     input  wire signed [15:0] aud_samp,  // 48kHz 采样（给频谱分析）
     input  wire        aud_samp_v,       // 采样有效
@@ -382,9 +382,10 @@ module top_osd_demo #(
         .clk     (clk),
         .rst_n   (rst_n),
         // seg7 的 dsel=0 对应最左边一位，而取的是 value[3:0]，所以这里反着拼：
-        //   左->右 = 图片数 | {ld_st,sd_ready} | 挂载状态 | 扫描状态 | 0 | 0
-        //   正常: 3 9 0 8 0 0
-        .value   ({8'd0, dbg_ext[3:0], dbg_ext[7:4], dbg_ext[11:8], dbg_ext[15:12]}),
+        //   左->右 = 读通路丢字 | 图片数 | {ld_st,sd_ready} | 挂载状态 | 扫描状态
+        //   6 位数字；正常: 0 0 3 9 0 8（丢字必须一直是 00）
+        .value   ({dbg_ext[3:0], dbg_ext[7:4], dbg_ext[11:8], dbg_ext[15:12],
+                   dbg_ext[19:16], dbg_ext[23:20]}),
         .dp_mask ({menu_open, 5'b00000}),
         .seg_sel (seg_sel),
         .seg_data(seg_data)

@@ -54,10 +54,10 @@ module top_board #(
 )(
     input  wire        clk_50m,       // R7
 
-    input  wire        key1,          // A2  UP    上一张 / 菜单上移
-    input  wire        key2,          // C1  DOWN  下一张 / 菜单下移
-    input  wire        key3,          // B1  MENU  功能菜单 / 菜单内确认
-    input  wire        key4,          // B2  LIST  音乐列表 / 菜单内关闭
+    input  wire        key1,          // A2  上   ：上一张 / 菜单内上移
+    input  wire        key2,          // C1  列表 ：音乐列表 / 菜单内关闭
+    input  wire        key3,          // B1  菜单 ：功能菜单 / 菜单内确认
+    input  wire        key4,          // B2  下   ：下一张 / 菜单内下移
 
     // SD 卡（SPI 模式）
     output wire        sd_clk,        // A14
@@ -244,6 +244,7 @@ module top_board #(
     wire        sc_busy;
     wire [11:0] sc_x, sc_y;
     wire [15:0] sc_rgb;
+    wire [7:0]  fb_rd_drop;           // 读通路丢字计数（>0 就会纵向错行）
     wire [2:0]  sc_k;
     reg         sc_clr;               // 换图前清屏（把整个 640x480 框写黑）
     wire        sc_clr_done, sc_clr_busy;
@@ -289,6 +290,7 @@ module top_board #(
         .wr_fifo_used(fb_wf_used),
         .wr_idle (fb_wr_idle),
         .wr_drop (fb_wr_drop),
+        .rd_drop_cnt(fb_rd_drop),
         .rgb_out (fb_rgb),
         .de_out  (fb_de)
     );
@@ -1070,9 +1072,9 @@ module top_board #(
     //   正常:  3 9 0 8 0 0   （3 张图 / SHOW / 挂载完 / 扫描完）
     //   卡在挂载: 0 1 1 3 0 0 （S_M0 / S_RCV）
     //   扫描错:  F 3 ...    挂载错: E 1 ...
-    wire [15:0] dbg_ext = (scan_err != 8'd0) ? {4'hF, scan_err, 8'h00}
-                        : (mnt_err  != 8'd0) ? {4'hE, mnt_err, 8'h00}
-                        : { img_total_p[3:0], ld_st, sd_ready,
+    wire [23:0] dbg_ext = (scan_err != 8'd0) ? {fb_rd_drop, 4'hF, scan_err, 8'h00}
+                        : (mnt_err  != 8'd0) ? {fb_rd_drop, 4'hE, mnt_err, 8'h00}
+                        : { fb_rd_drop, img_total_p[3:0], ld_st, sd_ready,
                             1'b0, mnt_st, scan_st };
 
     wire        menu_open;
@@ -1090,10 +1092,10 @@ module top_board #(
         .MUS_NUM(6)
     ) u_core (
         .clk(clk_pix), .rst_n(rst_n),
-        // 按键重新分配（贴合"音乐相框"的用法）：
-        //   KEY1 -> DOWN：切换下一张     KEY2 -> UP  ：切换上一张
-        //   KEY3 -> OK  ：音乐列表/确认  KEY4 -> MENU：功能菜单
-        .key({key3, key2, key1, key4}),      // {OK=KEY3, DOWN=KEY2, UP=KEY1, LIST=KEY4}
+        // 按键分配（按板上丝印确认过）：
+        //   key1(A2)=上  key2(C1)=列表  key3(B1)=菜单  key4(B2)=下
+        //   key_in 位序 = {OK, DOWN, UP, LIST}
+        .key({key3, key4, key1, key2}),      // {OK=key3, DOWN=key4, UP=key1, LIST=key2}
         .rgb_out(rgb), .hs_out(hs), .vs_out(vs), .de_out(de),
         .x_out(x), .y_out(y),
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),

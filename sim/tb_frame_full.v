@@ -171,6 +171,9 @@ module tb_frame_full;
             frame_buf[act_y * FW + act_x] <= fb_rgb;
 
     integer x, y, xw, bad_w, bad_p, bad_win, bad_bank2, fd;
+    integer rf_peak = 0;
+    always @(posedge mem_clk)
+        if (u_fb.rf_used > rf_peak) rf_peak = u_fb.rf_used;
     integer chk_rd_base;
     reg [15:0] exp_word, exp_px;
     reg [31:0] rd_word;
@@ -297,6 +300,8 @@ module tb_frame_full;
                 if (u_chip.Bank0[259200 + y*480 + xw] !== 32'h5A5A5A5A) bad_bank2 = bad_bank2 + 1;
         $display("[res] bank B offset : %0d/960 wrong", bad_bank2);
 
+        $display("[res] read FIFO peak used = %0d / 2048, rtl rd_drop = %0d",
+                 rf_peak, u_fb.rd_drop_cnt);
         if (bad_w == 0 && bad_p == 0 && c_starve == 0 && bad_win == 0 && bad_bank2 == 0)
             $display("RESULT: PASS");
         else
