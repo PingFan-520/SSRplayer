@@ -54,10 +54,10 @@ module top_board #(
 )(
     input  wire        clk_50m,       // R7
 
-    input  wire        key1,          // A2  MENU
-    input  wire        key2,          // C1  OK
-    input  wire        key3,          // B1  UP
-    input  wire        key4,          // B2  DOWN
+    input  wire        key1,          // A2  UP    上一张 / 菜单上移
+    input  wire        key2,          // C1  DOWN  下一张 / 菜单下移
+    input  wire        key3,          // B1  MENU  功能菜单 / 菜单内确认
+    input  wire        key4,          // B2  LIST  音乐列表 / 菜单内关闭
 
     // SD 卡（SPI 模式）
     output wire        sd_clk,        // A14
@@ -644,13 +644,16 @@ module top_board #(
     reg        clr_ok;          // 清屏完成标志（clr_done 只有 1 拍，必须锁存）
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
     reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
-    reg [15:0] hold_frm;
 
-    // 菜单"切屏间隔"档位 -> 帧数（30fps）：3/5/8/15/30 秒
-    wire [15:0] hold_lim = (dbg_hold == 3'd0) ? 16'd90  :
-                           (dbg_hold == 3'd1) ? 16'd150 :
-                           (dbg_hold == 3'd2) ? 16'd240 :
-                           (dbg_hold == 3'd3) ? 16'd450 : 16'd900;
+    // ------------------------------------------------------------------
+    // 切图决策：手动（KEY1/KEY2）优先、自动（菜单 AUT）按档位计时。
+    // 全部集中在 nav_ctrl 里，top_board 只负责"收到 step 就开始换图"。
+    //   手动按键会挂起等显示态，加载/转场期间按下也不会丢（上板 bug）
+    //   自动关掉时计数恒 0，"OFF 却自己切"在结构上不可能（上板 bug）
+    // ------------------------------------------------------------------
+    wire        nav_step, nav_step_prev;
+    wire [15:0] nav_hold_cnt;
+
     reg [1:0]  sdi_sync;
     reg        done_s1, done_s2;
 
@@ -681,6 +684,20 @@ module top_board #(
         else        widle_sync <= {widle_sync[0], fb_wr_idle};
     end
     wire frame_top = (raw_y == 12'd0) && (raw_x == 12'd0);
+
+    nav_ctrl u_nav (
+        .clk       (clk_pix),
+        .rst       (~rst_n),
+        .frame_tick(frame_top),
+        .showing   (ld_st == LD_SHOW),
+        .auto_en   (dbg_auto),
+        .hold_sel  (dbg_hold),
+        .key_next  (nav_next),
+        .key_prev  (nav_prev),
+        .step      (nav_step),
+        .step_prev (nav_step_prev),
+        .hold_cnt  (nav_hold_cnt)
+    );
 
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -718,7 +735,6 @@ module top_board #(
             scale_d   <= 2'd0;
             first_img <= 1'b1;
             fin_dly   <= 13'd0;
-            hold_frm  <= 16'd0;
         end else begin
             if (ld_st != LD_LOAD) img_changed <= 1'b0;
 
@@ -791,7 +807,6 @@ module top_board #(
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             ld_wdog   <= 28'd0;
                             load_mode <= 1'b0;
-                            hold_frm  <= 16'd0;
                             // 转场：按菜单里选的特效分四种
                             //   FADE(0)  淡出到黑 -> 换 bank（看不见）-> 淡入
                             //   SLIDE(1) 新图从下往上推入（分界 153600 -> 0）
@@ -883,7 +898,6 @@ module top_board #(
                     if (frame_top) begin
                         if (fade_lvl >= 8'd224) begin
                             fade_lvl <= 8'd255;
-                            hold_frm <= 16'd0;
                             ld_st    <= LD_SHOW;
                         end else begin
                             fade_lvl <= fade_lvl + 8'd32;
@@ -908,7 +922,6 @@ module top_board #(
                             rd_bank_new <= wipe_dir ? rd_bank : rd_bank_new;
                             wr_bank     <= ~(wipe_dir ? rd_bank : rd_bank_new);
                             wipe_frm    <= 4'd0;
-                            hold_frm    <= 16'd0;
                             ld_st       <= LD_SHOW;
                         end else begin
                             wipe_frm <= wipe_frm + 4'd1;
@@ -919,7 +932,6 @@ module top_board #(
                                     rd_bank_new <= rd_bank_new;
                                     wr_bank     <= ~rd_bank_new;
                                     wipe_frm    <= 4'd0;
-                                    hold_frm    <= 16'd0;
                                     ld_st       <= LD_SHOW;
                                 end else if (rd_wipe <= 20'd60) begin
                                     rd_wipe <= 20'd0;
@@ -933,7 +945,6 @@ module top_board #(
                                     wr_bank     <= ~rd_bank;
                                     rd_wipe     <= 20'd720;
                                     wipe_frm    <= 4'd0;
-                                    hold_frm    <= 16'd0;
                                     ld_st       <= LD_SHOW;
                                 end else if (rd_wipe >= 20'd660) begin
                                     rd_wipe <= 20'd720;
@@ -951,25 +962,12 @@ module top_board #(
                     // 都会让下半帧从另一块 bank 取数（那正是"横缝 + 下半重复"的成因）
                     rd_wipe     <= 20'd720;
                     rd_bank_new <= rd_bank;
-                    // 手动切图（KEY1/KEY2）优先；自动轮播要菜单里开着才走
-                    if (frame_top && dbg_auto) hold_frm <= hold_frm + 16'd1;
-
-                    // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
-                    // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
-                    // 否则用户会以为缩放坏了（上板反馈过“缩放无法使用”）。
-                    if (dbg_scale != scale_d) begin
-                        scale_d   <= dbg_scale;
-                        if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
-                        sc_clr    <= 1'b1;
-                        clr_ok    <= 1'b0;
-                        clr_wdog  <= 26'd0;
-                        fin_dly   <= 13'd0;
-                        hold_frm  <= 16'd0;
-                        ld_st     <= LD_CLEAR;
-                    end else if (nav_next || nav_prev ||
-                                 (dbg_auto && (hold_frm >= hold_lim))) begin
-                        // 下一张 / 上一张 / 自动轮播到点
-                        if (nav_prev)
+                    // ---- 切图：唯一的入口是 nav_ctrl 的 step ----
+                    //   手动（KEY1/KEY2）优先，自动（菜单 AUT）按档位计时，
+                    //   两者都在 nav_ctrl 里判好，这里只负责"开始换图"。
+                    //   先判 nav_step：即使同一拍缩放档位也变了，按键也不会被吞。
+                    if (nav_step) begin
+                        if (nav_step_prev)
                             img_idx <= (img_idx == 8'd0) ? (img_total_p - 8'd1)
                                                          : (img_idx - 8'd1);
                         else
@@ -978,6 +976,17 @@ module top_board #(
                         scale_d   <= dbg_scale;
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
+                        if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
+                        sc_clr    <= 1'b1;
+                        clr_ok    <= 1'b0;
+                        clr_wdog  <= 26'd0;
+                        fin_dly   <= 13'd0;
+                        ld_st     <= LD_CLEAR;
+                    end else if (dbg_scale != scale_d) begin
+                        // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
+                        // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
+                        // 否则用户会以为缩放坏了（上板反馈过“缩放无法使用”）。
+                        scale_d   <= dbg_scale;
                         if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
@@ -1084,7 +1093,7 @@ module top_board #(
         // 按键重新分配（贴合"音乐相框"的用法）：
         //   KEY1 -> DOWN：切换下一张     KEY2 -> UP  ：切换上一张
         //   KEY3 -> OK  ：音乐列表/确认  KEY4 -> MENU：功能菜单
-        .key({key3, key1, key2, key4}),      // {OK, DOWN, UP, MENU}
+        .key({key3, key2, key1, key4}),      // {OK=KEY3, DOWN=KEY2, UP=KEY1, LIST=KEY4}
         .rgb_out(rgb), .hs_out(hs), .vs_out(vs), .de_out(de),
         .x_out(x), .y_out(y),
         .menu_open(menu_open), .dbg_item(dbg_item), .dbg_val(dbg_val),

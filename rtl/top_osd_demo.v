@@ -53,8 +53,8 @@ module top_osd_demo #(
     output wire        dbg_auto,     // 1=自动轮播
     output wire [2:0]  dbg_hold,     // 切屏间隔档位
     output wire        dbg_style,    // 0=条形 1=圆形
-    output wire        nav_next,     // KEY1（非菜单态）：下一张
-    output wire        nav_prev,     // KEY2（非菜单态）：上一张
+    output wire        nav_next,     // KEY2（非菜单态）：下一张
+    output wire        nav_prev,     // KEY1（非菜单态）：上一张
 
     output wire [5:0]  seg_sel,
     output wire [7:0]  seg_data,

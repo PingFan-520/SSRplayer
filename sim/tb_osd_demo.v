@@ -211,11 +211,24 @@ module tb_osd_demo;
         end
     endtask
 
+    // 导航脉冲计数（非菜单态按 KEY1/KEY2 应该正好产生 1 个脉冲）
+    integer n_next = 0, n_prev = 0;
+    always @(posedge clk) begin
+        if (dut.nav_next) n_next = n_next + 1;
+        if (dut.nav_prev) n_prev = n_prev + 1;
+    end
+
     initial begin
         #1000 rst_n = 1'b1;
 
+        // ==================================================================
+        //  键位约定（与 RTL 一致）：
+        //    press(1) = KEY1 上    press(2) = KEY2 下
+        //    press(3) = KEY3 功能菜单 / 确认    press(0) = KEY4 音乐列表 / 关闭
+        // ==================================================================
+
         // ------------------------------------------------------------------
-        // 0) 默认态：字幕 ON / 频谱 OFF / 音乐 OFF / 轮播 OFF / 首项 IMG
+        // 0) 默认态：字幕 ON / 频谱 OFF / 音乐 OFF / 轮播 OFF
         // ------------------------------------------------------------------
         repeat (4) @(posedge vs);
         $display("---- default state ----");
@@ -225,20 +238,21 @@ module tb_osd_demo;
         chk("cfg_auto",   dut.ef_auto,     1'b0);
         chk("v_sub",      dut.u_menu.v_sub, 1'b1);
         chk("v_trans",    dut.ef_trans,    2'd0);
-        dump_full(13);                    // 待机字幕（MUSIC PHOTO FRAME）
+        dump_full(13);
 
         // ------------------------------------------------------------------
-        // 1) 设置页：7 项，光标首项 IMG
+        // 1) KEY3 = 打开功能菜单（设置页 7 项，光标首项 IMG）
         // ------------------------------------------------------------------
-        press(0);
-        $display("---- settings page ----");
+        press(3);
+        $display("---- settings page (KEY3) ----");
+        chk("menu_open_after_key3", mo, 1'b1);
         chk("page",  dut.u_menu.page, 2'd0);
         chk("item",  it,              3'd0);
         shot(1);
         dump_full(0);
 
         // ------------------------------------------------------------------
-        // 2) OK 进入 IMG 子菜单
+        // 2) KEY3 再按一次 = 确认/进入 IMG 子菜单
         // ------------------------------------------------------------------
         press(3);
         $display("---- image submenu ----");
@@ -248,7 +262,7 @@ module tb_osd_demo;
         shot(2);
         dump_full(2);
 
-        // 3) 子菜单里：OK 打开轮播，再下移改转场 FADE -> SLIDE
+        // 3) 子菜单：KEY3 开轮播；KEY2 下移；改效果；再改间隔
         press(3);
         $display("---- submenu: autoplay ON ----");
         chk("v_auto", dut.u_menu.v_auto, 1'b1);
@@ -260,26 +274,25 @@ module tb_osd_demo;
         chk("ef_auto",  dut.ef_auto,  1'b1);
         chk("ef_trans", dut.ef_trans, 2'd1);
 
-        // 第 3 行：切屏间隔（默认 5s -> 8s）
-        press(2);
+        press(2);                          // 到「切屏间隔」
         chk("item", it, 3'd2);
         chk("v_hold_default", dut.u_menu.v_hold, 3'd1);
-        press(3);
+        press(3);                          // 5s -> 8s
         chk("v_hold", dut.u_menu.v_hold, 3'd2);
         repeat (3) @(posedge vs);
         chk("ef_hold", dut.ef_hold, 3'd2);
         shot(3);
         dump_full(1);
 
-        // 4) KEY4 从子菜单直接关闭（一次按键退出）
+        // 4) KEY4 在子菜单里一次按键直接关闭
         press(0);
-        $display("---- close from submenu ----");
+        $display("---- close from submenu (KEY4) ----");
         chk("menu_open", mo, 1'b0);
 
         // ------------------------------------------------------------------
         // 5) 字幕 OFF -> ON（设置页第 6 项 = SUB）
         // ------------------------------------------------------------------
-        press(0);                          // 打开设置页，光标回第 0 项
+        press(3);                          // 打开设置页，光标回第 0 项
         press(2); press(2); press(2);
         press(2); press(2); press(2);      // 0 -> 6（SUB）
         chk("item", it, 3'd6);
@@ -288,7 +301,7 @@ module tb_osd_demo;
         press(0);
         dump_full(15);
 
-        press(0);
+        press(3);
         press(2); press(2); press(2);
         press(2); press(2); press(2);
         press(3);                          // OFF -> ON
@@ -297,9 +310,9 @@ module tb_osd_demo;
         dump_full(16);
 
         // ------------------------------------------------------------------
-        // 6) VU 开关（第 5 项）：默认关 -> 开 -> 关
+        // 6) VU 二级菜单：默认关 -> 开 -> 模式 BAR->CIRC
         // ------------------------------------------------------------------
-        press(0);
+        press(3);
         press(2); press(2); press(2); press(2); press(2);   // 0 -> 5（VU）
         chk("item", it, 3'd5);
         press(3);                          // 进入 VU 子菜单
@@ -318,48 +331,68 @@ module tb_osd_demo;
         press(0);                          // 关闭
 
         // ------------------------------------------------------------------
-        // 7) 音乐列表：KEY3 直接进第 1 页，默认光标在 OFF，确认后仍是 OFF
+        // 7) KEY4 = 打开音乐列表（默认光标在 OFF）
         // ------------------------------------------------------------------
-        press(3);
-        $display("---- music list ----");
-        chk("page", dut.u_menu.page, 2'd1);
+        press(0);
+        $display("---- music list (KEY4) ----");
+        chk("music_page", dut.u_menu.page, 2'd1);
         chk("item", it, 3'd0);
         shot(4);
-        press(3);                          // 选 OFF
+        press(3);                          // 选中 OFF
         chk("menu_open", mo,     1'b0);
         repeat (3) @(posedge vs);
         chk("cfg_mus", dut.ef_mus, 3'd0);
 
-        // 8) 选 GEN -> 内置音阶（确认菜单到播放器的映射还在）
-        press(3);
+        // 8) 选 GEN -> 内置音阶
+        press(0);
         press(2);                          // OFF -> GEN
         press(3);
         repeat (3) @(posedge vs);
         chk("cfg_mus_gen", dut.ef_mus, 3'd1);
-        // 回到 OFF，保持上电默认行为
-        press(3);
+        press(0);
         press(1);                          // GEN -> OFF
         press(3);
         repeat (3) @(posedge vs);
         chk("cfg_mus_off", dut.ef_mus, 3'd0);
 
         // ------------------------------------------------------------------
-        // 9) 选中 T1：字幕应切成 "NOW PLAYING TEST01 MUSIC FRAME"
+        // 9) 选 T1：字幕应切成 "NOW PLAYING TEST01 MUSIC FRAME"
         // ------------------------------------------------------------------
-        press(3);                          // 音乐列表
+        press(0);
         press(2); press(2);                // OFF -> GEN -> T1
         chk("item", it, 3'd2);
-        press(3);                          // 选 T1
+        press(3);
         repeat (4) @(posedge vs);
         chk("cfg_mus_t1", dut.ef_mus, 3'd2);
         dump_full(17);
 
-        // 回到 OFF
-        press(3);
+        press(0);
         press(1); press(1);
         press(3);
         repeat (3) @(posedge vs);
         chk("cfg_mus_final", dut.ef_mus, 3'd0);
+
+        // ------------------------------------------------------------------
+        // 10) 非菜单态：KEY1=上一张 KEY2=下一张（各产生 1 个 nav 脉冲）
+        //     菜单打开时：方向键只移动光标，不产生 nav
+        // ------------------------------------------------------------------
+        $display("---- nav keys (menu closed) ----");
+        chk("menu_closed", mo, 1'b0);
+        n_next = 0; n_prev = 0;
+        press(2);                          // KEY2 下 -> 下一张
+        chk("nav_next_cnt", n_next, 1);
+        chk("nav_prev_cnt", n_prev, 0);
+        press(1);                          // KEY1 上 -> 上一张
+        chk("nav_prev_cnt2", n_prev, 1);
+        chk("nav_next_cnt2", n_next, 1);
+
+        $display("---- nav keys blocked while menu open ----");
+        press(3);                          // 打开设置页
+        n_next = 0; n_prev = 0;
+        press(2); press(1);
+        chk("nav_next_menu", n_next, 0);
+        chk("nav_prev_menu", n_prev, 0);
+        press(0);                          // 关闭
 
         if (n_fail == 0) $display("RESULT: PASS");
         else             $display("RESULT: FAIL (%0d)", n_fail);

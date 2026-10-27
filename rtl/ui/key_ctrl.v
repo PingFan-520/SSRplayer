@@ -109,3 +109,88 @@ module key_ctrl #(
     endgenerate
 
 endmodule
+
+
+// ============================================================================
+//  nav_ctrl.v（并入本文件）—— 图片切换的"计时 + 按键挂起"逻辑
+//
+//  设计原则（这里只做决定，不碰帧缓存/SD）：
+//    1) 手动优先：KEY1/KEY2 一旦按下就挂起，等画面回到"正常显示"
+//       （showing=1）再执行。加载/转场期间按键不会丢 —— 上板反馈的
+//       "按上下键没反应"就是因为脉冲落在 LOAD 里被吃掉了。
+//    2) 自动轮播必须 auto_en=1 才累计；关掉时计数恒 0，
+//       所以"轮播 OFF 却自己切图"在结构上不可能发生。
+//    3) 档位一变（hold_sel != hold_d）立刻清零，重新从头计时。
+//       否则改档位时会拿旧计数去比新阈值，看起来像"一改就切"。
+//    4) 每切一次（不论手动还是自动）计数归零，间隔从新图开始算。
+// ============================================================================
+module nav_ctrl #(
+    parameter integer FRAME_HZ = 30          // 只用于注释：hold 档位按帧数算
+)(
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        frame_tick,   // 帧首单拍
+    input  wire        showing,      // 1 = 正在正常显示（可接受切图）
+    input  wire        auto_en,      // 菜单里的轮播开关
+    input  wire [2:0]  hold_sel,     // 0..4 -> 3/5/8/15/30 秒
+    input  wire        key_next,     // KEY2：下一张
+    input  wire        key_prev,     // KEY1：上一张
+    output reg         step,         // 切图单拍
+    output reg         step_prev,    // 1 = 上一张
+    output reg  [15:0] hold_cnt      // 调试观测
+);
+
+    // 30fps 下的帧数：90/150/240/450/900
+    wire [15:0] hold_lim = (hold_sel == 3'd0) ? 16'd90  :
+                           (hold_sel == 3'd1) ? 16'd150 :
+                           (hold_sel == 3'd2) ? 16'd240 :
+                           (hold_sel == 3'd3) ? 16'd450 : 16'd900;
+
+    reg        pend;
+    reg        pend_dir;
+    reg [2:0]  hold_d;
+
+    // 手动：有挂起且画面正常显示 -> 立刻执行
+    wire man_due = pend & showing;
+    // 自动：开关打开 + 显示中 + 计数到点
+    wire auto_due = auto_en & showing & (hold_cnt >= hold_lim);
+    wire go       = man_due | auto_due;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            step      <= 1'b0;
+            step_prev <= 1'b0;
+            pend      <= 1'b0;
+            pend_dir  <= 1'b0;
+            hold_cnt  <= 16'd0;
+            hold_d    <= 3'd0;
+        end else begin
+            step      <= go;
+            step_prev <= go & (man_due ? pend_dir : 1'b0);
+
+            // ---- 按键挂起（按住不放时由上层 rep 连发覆盖方向）----
+            if (key_next) begin
+                pend     <= 1'b1;
+                pend_dir <= 1'b0;
+            end else if (key_prev) begin
+                pend     <= 1'b1;
+                pend_dir <= 1'b1;
+            end else if (man_due) begin
+                pend     <= 1'b0;
+            end
+
+            // ---- 间隔计数 ----
+            if (hold_sel != hold_d) begin
+                hold_d   <= hold_sel;
+                hold_cnt <= 16'd0;                  // 改档位：重新计时
+            end else if (!auto_en) begin
+                hold_cnt <= 16'd0;                  // 轮播关：永不累计
+            end else if (go) begin
+                hold_cnt <= 16'd0;                  // 刚切过：从新图重新计
+            end else if (showing && frame_tick && (hold_cnt < hold_lim)) begin
+                hold_cnt <= hold_cnt + 16'd1;
+            end
+        end
+    end
+
+endmodule

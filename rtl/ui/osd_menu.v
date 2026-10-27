@@ -117,6 +117,7 @@ module osd_menu #(
                          (page == 2'd3) ? 3'd1 : 3'd6;
 
     // 非菜单态下，KEY1/KEY2 直接切图（给上层用）
+    // 非菜单态：KEY1=上一张(up) KEY2=下一张(down)，与菜单里上下移动同向
     assign nav_next = ~open & key_down;
     assign nav_prev = ~open & key_up;
     assign page_mus = open & (page == 2'd1);
@@ -138,26 +139,30 @@ module osd_menu #(
             v_hold     <= 3'd1;      // 默认：5 秒
             v_style    <= 1'b0;      // 默认：底部条形
         end else begin
-            // ---- KEY4(MENU)：开/关。任何页都直接关闭（一次按键退出）----
+            // ============================================================
+            //  统一的按键语义（任何界面都一样）：
+            //    KEY1 = 上：菜单外上一张 / 菜单内光标上移
+            //    KEY2 = 下：菜单外下一张 / 菜单内光标下移
+            //    KEY3 = 进：菜单外打开功能菜单 / 菜单内确认·进入·改值
+            //    KEY4 = 退：菜单外打开音乐列表 / 菜单内关闭（任何页一次退出）
+            // ============================================================
             if (key_menu) begin
+                // ---- KEY4 ----
                 if (open) begin
-                    open <= 1'b0;
+                    open <= 1'b0;                // 菜单内：关闭
                 end else begin
-                    open <= 1'b1;
-                    page <= 2'd0;                // 每次打开都回到设置页首项
-                    item <= 3'd0;
-                end
-            end
-
-            // ---- KEY3(OK)：非菜单态打开音乐列表；音乐页里确认；
-            //      设置页里改值/进子菜单；子菜单里改值 ----
-            if (key_ok) begin
-                if (!open) begin
-                    open <= 1'b1;
+                    open <= 1'b1;                // 菜单外：打开音乐列表
                     page <= 2'd1;
                     // 光标停在当前曲目上；卡换了/曲目变少时夹回列表内
                     item <= ({1'b0, v_mus} > ({1'b0, mus_total} + 4'd1))
                             ? 3'd0 : v_mus;
+                end
+            end else if (key_ok) begin
+                // ---- KEY3 ----
+                if (!open) begin
+                    open <= 1'b1;                // 菜单外：打开功能菜单（设置页）
+                    page <= 2'd0;
+                    item <= 3'd0;
                 end else if (page == 2'd1) begin
                     v_mus <= item;                // 0=OFF 1=GEN 2..=T1..
                     open  <= 1'b0;                // 选完自动关闭
@@ -512,29 +517,28 @@ module osd_menu #(
         end
     endfunction
 
+    // 底部提示行（所有页统一）："OK SET   K4 EXIT"
+    //   KEY3 = 确认/改值/进入，KEY4 = 关闭；上下移动由高亮行自己说明。
     function [5:0] g_hint;
-        input       sub;                 // 1 = 子菜单页：OK 改值（不是 NEXT）
         input [4:0] i;
         begin
             case (i)
                 5'd0:  g_hint = 6'd14;   // O
                 5'd1:  g_hint = 6'd10;   // K
                 5'd2:  g_hint = 6'd37;
-                5'd3:  g_hint = sub ? 6'd18 : 6'd13;   // S / N
-                5'd4:  g_hint = 6'd4;                  // E
-                5'd5:  g_hint = sub ? 6'd19 : 6'd23;   // T / X
-                5'd6:  g_hint = sub ? 6'd37 : 6'd19;   // 空 / T
+                5'd3:  g_hint = 6'd18;   // S
+                5'd4:  g_hint = 6'd4;    // E
+                5'd5:  g_hint = 6'd19;   // T
+                5'd6:  g_hint = 6'd37;
                 5'd7:  g_hint = 6'd37;
-                5'd8:  g_hint = 6'd37;
-                5'd9:  g_hint = 6'd12;   // M
-                5'd10: g_hint = 6'd4;    // E
-                5'd11: g_hint = 6'd13;   // N
-                5'd12: g_hint = 6'd20;   // U
-                5'd13: g_hint = 6'd37;
-                5'd14: g_hint = 6'd4;    // E
-                5'd15: g_hint = 6'd23;   // X
-                5'd16: g_hint = 6'd8;    // I
-                default: g_hint = 6'd19; // T
+                5'd8:  g_hint = 6'd10;   // K
+                5'd9:  g_hint = 6'd30;   // 4
+                5'd10: g_hint = 6'd37;
+                5'd11: g_hint = 6'd4;    // E
+                5'd12: g_hint = 6'd23;   // X
+                5'd13: g_hint = 6'd8;    // I
+                5'd14: g_hint = 6'd19;   // T
+                default: g_hint = 6'd37;
             endcase
         end
     endfunction
@@ -820,7 +824,7 @@ module osd_menu #(
             s0_tcolor = C_VALUE;
         end else if (r_open && hint_hv) begin
             s0_text   = 1'b1;
-            s0_glyph  = g_hint(r_page >= 2'd2, hcx[8:4]);
+            s0_glyph  = g_hint(hcx[8:4]);
             s0_fcol   = hcx[3:0];
             s0_frow   = y - (py0_cur + ph_cur - 28);
             s0_tcolor = C_HINT;
