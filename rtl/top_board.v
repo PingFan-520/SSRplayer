@@ -658,13 +658,27 @@ module top_board #(
     reg [12:0] fin_dly;
     reg        clr_ok;          // 清屏完成标志（clr_done 只有 1 拍，必须锁存）
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
-    reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
+
+    // ★ 一次切图的总计时（从"开始换图"那一拍起，饱和，绝不回绕）
+    //   旧版用 ld_wdog 兼职三件事：进度节拍、加载超时、进度的清零条件。
+    //   结果在 LD_LOAD 里它只在 !rdr_done 时累加，超时又写成"等于某值"只成立 1 拍，
+    //   超时收不干净 -> 32 位没饱和 -> 7.16s 回绕一次 -> "ld_wdog==0" 把进度清零，
+    //   于是数码管 0→99 反复、一次切图几十秒。现在计时只做一件事：饱和计数。
+    reg [27:0] sw_tmr;
+    reg [2:0]  ld_st_d;
+    reg [3:0]  dur_q;           // 上一次切图耗时（0.447s 一格，F = 6.7s 以上）
+    reg [3:0]  sw_cnt;          // 上电以来一共切了几次图（诊断"是否真在反复切"）
 
     // 诊断：本次切图一共进了几次 LD_LOAD。
     //   每次按键/自动切图清零，在静止态显示在数码管最左一位。
     //   01 = 只加载了一次（那"0→99 反复"就只是进度显示问题）
     //   03 = 真的反复加载了 3 次
     reg [3:0]  load_cnt;
+
+    // 加载失败（超时 / reader 报错）后的自愈重试：每次切图只重试一次。
+    //   reinit_pulse 交给下面 boot_tmr 那一段去拉 sd_reinit。
+    reg        ld_retry;
+    reg        reinit_pulse;
 
     // 每张图加载完后记下"它有没有铺满整块"。下一张换图时，如果上一张是满屏，
     // 说明旧图的每个像素都会被新图覆盖 —— 不用清屏，省掉 0.65s 的全屏写黑。
@@ -733,6 +747,46 @@ module top_board #(
         .hold_cnt  (nav_hold_cnt)
     );
 
+    // ------------------------------------------------------------------
+    // 一次切图的计时（唯一计时源）
+    //   ld_start : 切图决策那一拍（按键 / 自动 / 缩放重载）
+    //   ld_run   : 正在换图的那些状态（清屏 / ARM / 读图 / 转场）
+    //   ld_tmo   : 3.4s 硬超时 —— 电平，一旦到点就一直保持到下一次切图，
+    //              所以"看门狗要成立 65 拍才能收工"这件事不会再因为
+    //              比较值只成立 1 拍而永远收不了工。
+    // ------------------------------------------------------------------
+    wire ld_start = (ld_st == LD_SHOW) && (nav_step || (dbg_scale != scale_d));
+    wire ld_run   = (ld_st != LD_SHOW) && (ld_st != LD_WAIT);
+    wire ld_tmo   = (sw_tmr >= 28'd127_500_000);          // 3.4s @37.5MHz
+
+    // 自愈重试也要把计时/进度清零，否则第二次加载一进来就"已超时"
+    wire sw_rst   = ld_start || reinit_pulse;
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n)                        sw_tmr <= 28'd0;
+        else if (sw_rst)                   sw_tmr <= 28'd0;
+        else if (ld_run && (sw_tmr != 28'hFFFFFFF)) sw_tmr <= sw_tmr + 28'd1;
+    end
+
+    // 切图次数：用户按一次"下一张"，这里必须只 +1。
+    // 如果看到它一次跳 3~4，说明 nav_step 真的在连发（而不是读图反复）。
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n)                                     sw_cnt <= 4'd0;
+        else if (ld_start && (sw_cnt != 4'hF))          sw_cnt <= sw_cnt + 4'd1;
+    end
+
+    // 回到"正常显示"那一拍，把这次切图的总耗时抓下来（0.447s 一格）
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) ld_st_d <= LD_WAIT;
+        else        ld_st_d <= ld_st;
+    end
+    wire show_enter = (ld_st == LD_SHOW) && (ld_st_d != LD_SHOW);
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n)          dur_q <= 4'd0;
+        else if (show_enter) dur_q <= (sw_tmr >= 28'hF000000) ? 4'hF : sw_tmr[27:24];
+    end
+
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
             sdi_sync <= 2'b00;
@@ -756,8 +810,9 @@ module top_board #(
             sc_clr    <= 1'b0;
             clr_ok    <= 1'b0;
             clr_wdog  <= 24'd0;
-            ld_wdog   <= 28'd0;
             load_cnt  <= 4'd0;
+            ld_retry  <= 1'b0;
+            reinit_pulse <= 1'b0;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
@@ -772,6 +827,7 @@ module top_board #(
             fin_dly   <= 13'd0;
         end else begin
             if (ld_st != LD_LOAD) img_changed <= 1'b0;
+            reinit_pulse <= 1'b0;
 
             case (ld_st)
                 LD_WAIT: begin
@@ -779,7 +835,6 @@ module top_board #(
                         sc_clr   <= 1'b1;     // 先清屏，再开始读图
                         clr_ok   <= 1'b0;
                         clr_wdog <= 26'd0;
-                        ld_wdog  <= 28'd0;    // 进度计时从这一刻开始
                         fin_dly  <= 13'd0;
                         ld_st    <= LD_CLEAR;
                     end
@@ -789,8 +844,7 @@ module top_board #(
                 // 153600 字，只在写窗口里跑，约 57ms（首张 load_mode=1 时约 20ms）。
                 LD_CLEAR: begin
                     sc_clr <= 1'b0;
-                    // 清屏也要走 0.6s，这段时间进度条必须动，否则用户以为卡住
-                    if (ld_wdog != 28'hFFFFFFF) ld_wdog <= ld_wdog + 28'd1;
+                    // 清屏也要走 0.6s，进度靠 sw_tmr 自己走，这里不用管
                     // 清屏结束还要等写 FIFO 排空：清屏最后那 256 个字可能正卡在
                     // 写窗口外。FIFO 满着就开读的话，刚开始的像素会被丢掉。
                     //
@@ -815,7 +869,7 @@ module top_board #(
                 // 避免多比特总线正在变化时被采样。
                 LD_ARM: begin
                     if (fin_dly == 13'd16) begin
-                        rd_en    <= 1'b1;      // ld_wdog 不清零：接着清屏的计时走
+                        rd_en    <= 1'b1;
                         fin_dly  <= 13'd0;
                         if (load_cnt != 4'hF) load_cnt <= load_cnt + 4'd1;
                         ld_st    <= LD_LOAD;
@@ -835,23 +889,30 @@ module top_board #(
                     // 再要求"当前不在图片行"：换 bank 只在消隐期发生，
                     // 否则这一帧会上面旧图、下面新图（看起来像两张图拼接）
                     // 加载超时保护：SD 万一读不完（坏块/接触不良），
-                    // 3 秒后强制收工，至少把已经写进去的部分显示出来，
+                    // 3.4 秒后强制收工，至少把已经写进去的部分显示出来，
                     // 而不是永远卡在 LOAD（黑屏）。
-                    if (!rdr_done_p) ld_wdog <= ld_wdog + 28'd1;
+                    // ★ 超时用 ld_tmo（电平保持），不是"等于某个计数值"——
+                    //   后者只成立 1 拍，收工条件（fin_dly 数到 64）永远凑不满。
 
-                    // 读失败（扇区重试用尽）：别再白等看门狗，立刻放弃这次换图，
-                    // 保持上一张继续显示 —— 宁可这一下不换，也不要黑屏/花屏 +
-                    // 卡 3 秒。上电首张失败就回 WAIT 重新来。
-                    if (rdr_err_p && rdr_done_p) begin
+                    // 读失败（扇区重试用尽）或加载超时：
+                    //   先自愈重试一次 —— 把 SD 段（sd_ctrl_top/arb/mnt/scan + reader）
+                    //   整体复位，回 LD_WAIT 重新挂载扫描，然后再读这张图。
+                    //   上板实测"卡一次之后就再也起不来"，就是没人给它复位。
+                    //   第二次还失败才按老路收工（保留旧图 / 首张继续等）。
+                    if (((rdr_err_p && rdr_done_p) || ld_tmo) && !ld_retry) begin
+                        ld_retry     <= 1'b1;
+                        reinit_pulse <= 1'b1;
+                        rd_en        <= 1'b0;
+                        fin_dly      <= 13'd0;
+                        ld_st        <= LD_WAIT;
+                    end else if (rdr_err_p && rdr_done_p) begin
                         rd_en     <= 1'b0;
-                        ld_wdog   <= 28'd0;
                         fin_dly   <= 13'd0;
                         ld_st     <= first_img ? LD_WAIT : LD_SHOW;
                     end else if ((rdr_done_p && wr_idle_p && !in_img_row) ||
-                        (ld_wdog == 28'h7FFFFF0)) begin
+                        ld_tmo) begin
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
-                            ld_wdog   <= 28'd0;
                             load_mode <= 1'b0;
                             // 转场：按菜单里选的特效分四种
                             //   FADE(0)  淡出到黑 -> 换 bank（看不见）-> 淡入
@@ -1023,8 +1084,8 @@ module top_board #(
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
                         if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
-                        ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
                         load_cnt  <= 4'd0;     // 新一次切图，重新计数
+                        ld_retry  <= 1'b0;     // 新一次切图，允许自愈重试
                         fin_dly   <= 13'd0;
                         if (last_full) begin
                             // 上一张铺满整块 -> 新图会覆盖全部像素，清屏纯属浪费
@@ -1047,8 +1108,8 @@ module top_board #(
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
                         clr_wdog  <= 26'd0;
-                        ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
                         load_cnt  <= 4'd0;
+                        ld_retry  <= 1'b0;
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end
@@ -1107,6 +1168,11 @@ module top_board #(
                 boot_tmr  <= 27'd0;
                 sd_reinit <= 1'b0;
             end
+        end else if (reinit_pulse) begin
+            // ★ 加载超时/读失败后的自愈：由 FSM 打一拍，这里统一拉 sd_reinit。
+            //   （sd_reinit 只在这一个 always 块里赋值，避免多驱动）
+            sd_reinit <= 1'b1;
+            boot_tmr  <= 27'd0;
         end else if (ld_st != LD_WAIT) begin
             boot_tmr <= 27'd0;
         end else if (sd_bus_stuck) begin
@@ -1126,23 +1192,22 @@ module top_board #(
 
     // ------------------------------------------------------------------
     // 数码管（6 位，左->右）：
-    //   读图进度/丢字 | 图片数 | {ld_st,sd_ready} | 挂载状态 | 扫描状态
-    //   静止正常: 0 0 3 9 0 8
-    //   读图中  : 4 7 3 7 0 8  （47% / 3 张 / LOAD）
+    //   读图进度(00~99) / 静止时"加载次数|丢字" | 图片数 | {ld_st,sd_ready}
+    //   | 切图次数 | 上次切图耗时（0.447s 一格，F=6.7s 以上）
+    //   静止正常: 1 0 4 9 1 3   （1 次加载 / 0 丢字 / 4 张 / SHOW / 1 次切图 / 1.3s）
+    //   读图中  : 4 7 4 7 1 0   （47% / 4 张 / LOAD / 1 次切图 / …）
     //   扫描错  : .. F 3 ..     挂载错: .. E 1 ..
     //
-    // ★ 进度只用 9 个寄存器：拿**已有的**加载看门狗 ld_wdog 当计时源，
-    //   取 ld_wdog[19] 的上升沿（2^19 / 37.5MHz ≈ 14ms）让两位 BCD 加 1，
-    //   1.4s 正好走满 100%。上一版用 13 位像素计数器 + 比较（21 个寄存器 +
-    //   一堆进位链），把布局推到临界、phy_1 单点布线冲突布不通，已废弃。
-    //   读图速率是恒定的（25MHz SPI），所以按时间走和按像素走差别 <10%。
+    // ★ 进度只用 9 个寄存器：拿 sw_tmr[19] 的上升沿（2^20/37.5MHz = 28ms）
+    //   让两位 BCD 加 1，2.77s 走满 100%。sw_tmr 只由"切图那一拍"清零，
+    //   加载过程中绝不清零 —— 所以进度条不可能自己重头再走一遍。
     // ------------------------------------------------------------------
     wire        ld_busy = (ld_st == LD_CLEAR) || (ld_st == LD_ARM) ||
                           (ld_st == LD_LOAD);
 
     reg        wd19_d;
     reg  [3:0] prog_t, prog_u;               // 十位 / 个位（BCD）
-    wire       prog_tick = ld_wdog[19] & ~wd19_d;
+    wire       prog_tick = sw_tmr[19] & ~wd19_d;
     wire       prog_top  = (prog_t == 4'd9) && (prog_u == 4'd9);
 
     always @(posedge clk_pix or negedge rst_n) begin
@@ -1151,11 +1216,12 @@ module top_board #(
             prog_t <= 4'd0;
             prog_u <= 4'd0;
         end else begin
-            wd19_d <= ld_wdog[19];
-            if (sc_clr || (ld_wdog == 28'd0)) begin
-                // 切图那一刻清零。ld_wdog 在切图那一拍被清零、到 LD_LOAD 才开始
-                // 累加，所以 "ld_wdog == 0" 正好覆盖"跳过清屏时 sc_clr 不拉高"的情况。
-                // 不能用 "ld_st == LD_CLEAR"：清屏要跑 0.6s，那样整段都是 00。
+            wd19_d <= sw_tmr[19];
+            if (sw_rst) begin
+                // ★ 只在"开始换图"那一拍清零。
+                //   旧版写的是 "sc_clr || ld_wdog==0"：ld_wdog 在 LD_LOAD 里
+                //   一旦没人推进就会一直走到 2^28 回绕成 0，于是进度条被
+                //   半路清零重走 —— 上板看到的"0→99 反复"就是它。
                 prog_t <= 4'd0;
                 prog_u <= 4'd0;
             end else if (prog_tick && ld_busy && !prog_top) begin
@@ -1179,7 +1245,7 @@ module top_board #(
     wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
                         : (mnt_err  != 8'd0) ? {dbg_head, 4'hE, mnt_err, 8'h00}
                         : { dbg_head, img_total_p[3:0], ld_st, sd_ready,
-                            1'b0, mnt_st, scan_st };
+                            sw_cnt, dur_q };
 
     wire        menu_open;
     wire [2:0]  dbg_item;

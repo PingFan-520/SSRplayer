@@ -35,6 +35,7 @@ reg    [15:0]  to_cnt        ;            //阶段超时（2.6ms @25MHz）
 reg    [47:0]  cmd_rd        ;            //读命令
 reg    [5:0]   cmd_bit_cnt   ;            //读命令位计数器
 reg            rd_data_flag  ;            //准备读取数据的标志
+reg            rx_abort      ;            //★ 清接收器内部状态（换命令 / 超时后）
 
 //wire define
 wire           pos_rd_en     ;            //开始读SD卡数据信号的上升沿
@@ -104,8 +105,17 @@ always @(negedge clk_ref or negedge rst_n) begin
     else begin
         rx_en_t <= 1'b0; 
         rx_finish_en <= 1'b0;
+        // ★ 收到一半超时 / 换新命令：把接收器彻底清干净。
+        //   原来只清 rd_data_flag，rx_flag / rx_bit_cnt / rx_data_cnt 会带着
+        //   上一次的残余值进下一次传输，字节数一错就整扇区判失败。
+        if (rx_abort) begin
+            rx_flag     <= 1'b0;
+            rx_bit_cnt  <= 4'd0;
+            rx_data_cnt <= 9'd0;
+            rx_data_t   <= 16'd0;
+        end
         //数据头0xfe 8'b1111_1110，所以检测0为起始位
-        if(rd_data_flag && sd_miso == 1'b0 && rx_flag == 1'b0)    
+        else if(rd_data_flag && sd_miso == 1'b0 && rx_flag == 1'b0)    
             rx_flag <= 1'b1;   
         else if(rx_flag) begin
             rx_bit_cnt <= rx_bit_cnt + 4'd1;
@@ -155,8 +165,10 @@ always @(posedge clk_ref or negedge rst_n) begin
         cmd_bit_cnt <= 6'd0;
         rd_busy <= 1'b0;
         rd_data_flag <= 1'b0;
+        rx_abort <= 1'b0;
     end   
     else begin
+        rx_abort <= 1'b0;
         case(rd_ctrl_cnt)
             4'd0 : begin
                 rd_busy <= 1'b0;
@@ -166,6 +178,8 @@ always @(posedge clk_ref or negedge rst_n) begin
                     cmd_rd <= {8'h51,rd_sec_addr,8'hff};    //写入单个命令块CMD17
                     rd_ctrl_cnt <= rd_ctrl_cnt + 4'd1;      //控制计数器加1
                     to_cnt <= 16'd0;
+                    cmd_bit_cnt <= 6'd0;                    //★ 命令位计数器必须归零
+                    rx_abort <= 1'b1;                       //★ 清接收器残余状态
                     //开始执行读取数据,拉高读忙信号
                     rd_busy <= 1'b1;                      
                 end    
@@ -181,7 +195,19 @@ always @(posedge clk_ref or negedge rst_n) begin
                     if(res_en) begin                        //SD卡响应
                         rd_ctrl_cnt <= rd_ctrl_cnt + 4'd1;  //控制计数器加1 
                         cmd_bit_cnt <= 6'd0;
-                    end    
+                        to_cnt <= 16'd0;
+                    end
+                    else begin
+                        // ★ 等响应也要有超时：卡没应答（接触不良/命令被打断）时
+                        //   原来会永远停在这里，rd_busy 一直高，整条 SD 总线死锁，
+                        //   上层只能一轮一轮等看门狗 —— 上板就是"0→99 反复、几十秒"。
+                        to_cnt <= to_cnt + 16'd1;
+                        if (to_cnt == 16'hFFFF) begin
+                            rd_ctrl_cnt <= 4'd15;
+                            cmd_bit_cnt <= 6'd0;
+                            sd_cs       <= 1'b1;
+                        end
+                    end
                 end    
             end    
             4'd2 : begin
@@ -193,6 +219,7 @@ always @(posedge clk_ref or negedge rst_n) begin
                 if (to_cnt == 16'hFFFF) begin
                     rd_ctrl_cnt <= 4'd15;
                     rd_data_flag <= 1'b0;
+                    rx_abort <= 1'b1;
                     sd_cs <= 1'b1;
                 end
                 else if(rx_finish_en) begin                 //数据接收完成
