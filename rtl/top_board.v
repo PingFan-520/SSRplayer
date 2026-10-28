@@ -242,6 +242,8 @@ module top_board #(
     // 写侧数据源：BMP 解码 -> 自适应缩放 -> 帧缓存
     wire        sc_we;
     wire        sc_busy;
+    wire        sc_full;             // 这张图是否铺满整块（= 换图时不必清屏）
+    reg         last_full;           // 上一张是否铺满
     wire [11:0] sc_x, sc_y;
     wire [15:0] sc_rgb;
     wire [7:0]  fb_rd_drop;           // 读通路丢字计数（>0 就会纵向错行）
@@ -593,7 +595,8 @@ module top_board #(
         .o_y      (sc_y),
         .o_rgb    (sc_rgb),
         .o_k      (sc_k),
-        .o_busy   (sc_busy)
+        .o_busy   (sc_busy),
+        .o_full   (sc_full)
     );
 
     // ------------------------------------------------------------------
@@ -646,6 +649,15 @@ module top_board #(
     reg        clr_ok;          // 清屏完成标志（clr_done 只有 1 拍，必须锁存）
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
     reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
+
+    // 每张图加载完后记下"它有没有铺满整块"。下一张换图时，如果上一张是满屏，
+    // 说明旧图的每个像素都会被新图覆盖 —— 不用清屏，省掉 0.65s 的全屏写黑。
+    // 万一下一张是小图（有黑边），那一次会露出旧图，但加载完 last_full 变 0，
+    // 之后就恢复清屏，属于自愈。
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n)                          last_full <= 1'b0;
+        else if (ld_st == LD_LOAD)           last_full <= sc_full;
+    end
 
     // ------------------------------------------------------------------
     // 切图决策：手动（KEY1/KEY2）优先、自动（菜单 AUT）按档位计时。
@@ -981,12 +993,20 @@ module top_board #(
                         // 安全护栏：加载前必须保证"写的那块 != 正在显示的那块"，
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
                         if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
-                        sc_clr    <= 1'b1;
-                        clr_ok    <= 1'b0;
-                        clr_wdog  <= 26'd0;
                         ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
                         fin_dly   <= 13'd0;
-                        ld_st     <= LD_CLEAR;
+                        if (last_full) begin
+                            // 上一张铺满整块 -> 新图会覆盖全部像素，清屏纯属浪费
+                            // （清屏要写 518400 个像素，约 0.65s）
+                            sc_clr    <= 1'b0;
+                            clr_ok    <= 1'b1;     // 当作"已经清过"，跳过 LD_CLEAR
+                            ld_st     <= LD_ARM;
+                        end else begin
+                            sc_clr    <= 1'b1;
+                            clr_ok    <= 1'b0;
+                            clr_wdog  <= 26'd0;
+                            ld_st     <= LD_CLEAR;
+                        end
                     end else if (dbg_scale != scale_d) begin
                         // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
                         // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
@@ -1100,10 +1120,10 @@ module top_board #(
             prog_u <= 4'd0;
         end else begin
             wd19_d <= ld_wdog[19];
-            if (sc_clr) begin
-                // 切图那一拍清零（sc_clr 是单拍脉冲）。
-                // 不能用 "ld_st == LD_CLEAR"：清屏要跑 0.6s，那样整段都是 00，
-                // 用户按下去看到的还是 00，以为没收到指令。
+            if (sc_clr || (ld_wdog == 28'd0)) begin
+                // 切图那一刻清零。ld_wdog 在切图那一拍被清零、到 LD_LOAD 才开始
+                // 累加，所以 "ld_wdog == 0" 正好覆盖"跳过清屏时 sc_clr 不拉高"的情况。
+                // 不能用 "ld_st == LD_CLEAR"：清屏要跑 0.6s，那样整段都是 00。
                 prog_t <= 4'd0;
                 prog_u <= 4'd0;
             end else if (prog_tick && ld_busy && !prog_top) begin

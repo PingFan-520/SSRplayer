@@ -187,12 +187,21 @@ module frame_buffer #(
     reg         rburst;
 
     reg [22:0]  idle_tmr;
-    wire        tail_drop = (idle_tmr == 23'h7FFFFF) && (bn != 3'd0);
+    // 23 位全 1 的与运算有 4~5 级 LUT，直接连到 bn/bb* 的时钟使能会超 8ns
+    // （TD 报过 idle_tmr[12] -> bb1_reg[11].ce，7 级逻辑 8.10ns，-0.46ns）。
+    // 把"超时"先打一拍：67ms 的超时晚一拍毫无影响，但路径从寄存器出发。
+    reg         idle_tmo;
+    wire        tail_drop = idle_tmo && (bn != 3'd0);
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem)                          idle_tmr <= 23'd0;
         else if (!wf_empty || bsend || a_vld)  idle_tmr <= 23'd0;
         else if (idle_tmr != 23'h7FFFFF)      idle_tmr <= idle_tmr + 23'd1;
+    end
+
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem) idle_tmo <= 1'b0;
+        else         idle_tmo <= (idle_tmr == 23'h7FFFFF);
     end
 
     // ------------------------------------------------------------------

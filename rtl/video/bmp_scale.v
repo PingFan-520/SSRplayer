@@ -57,7 +57,8 @@ module bmp_scale #(
     output reg  [15:0] o_rgb,
 
     output wire [2:0]  o_k,            // 当前水平缩放级别（调试用）
-    output wire        o_busy          // 1 = 下游满 / 有像素待发，上游应停止送数
+    output wire        o_busy,         // 1 = 下游满 / 有像素待发，上游应停止送数
+    output wire        o_full          // 1 = 这张图缩放后正好铺满整个框（无黑边）
 );
 
     localparam [15:0] DWP = DW;
@@ -126,6 +127,10 @@ module bmp_scale #(
     // 居中偏移（有符号）：源比框大时为负 -> 裁切
     wire signed [12:0] ox_s = ($signed({1'b0, DWP}) - $signed({1'b0, ws})) >>> 1;
     wire signed [12:0] oy_s = ($signed({1'b0, DHP}) - $signed({1'b0, hs})) >>> 1;
+
+    // 铺满判断：放大后的尺寸 >= 目标框就没有黑边，整块都会被覆盖。
+    // 上层用它决定"换图时还要不要清屏"——满屏图直接覆盖旧图，不用清。
+    assign o_full = (ws >= DWP) && (hs >= DHP);
 
     // 采样掩码：低 k 位为 0 才输出（k=4 时 1<<4 在 4 位里回绕成 0，0-1=15，正确）
     wire [3:0] kmask_x = (kx == 3'd0) ? 4'd0 : ((4'd1 << kx) - 4'd1);

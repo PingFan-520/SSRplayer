@@ -64,7 +64,7 @@ module tb_img_chain;
         .img_w(o_img_w), .img_h(o_img_h), .mode(2'd0),
         .clr(1'b0), .clr_done(), .clr_busy(),
         .o_rdy(o_rdy_r),
-        .o_we(p_we), .o_x(p_x), .o_y(p_y), .o_rgb(p_rgb), .o_k(p_k), .o_busy(scale_busy)
+        .o_we(p_we), .o_x(p_x), .o_y(p_y), .o_rgb(p_rgb), .o_k(p_k), .o_busy(scale_busy), .o_full()
     );
 
     // ---------------- 收集 ----------------

@@ -76,3 +76,7 @@ sim/fat_exp/
 sim/preview_resample*.png
 sim/sub_zoom*.png
 sim/meter_circ_zoom.png
+
+# ---- 960x540 转换产物（tools/make_960x540.py 可重新生成）----
+sd960/
+sim/img_src.bmp
