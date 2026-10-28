@@ -235,7 +235,13 @@ module frame_buffer #(
 
     reg  wfly;
 
-    assign wf_rd = wr_win_m & ~wf_empty & ~a_vld & ~wfly;
+    // ★ 写 FIFO 出队不再只在"帧首 16 行"里做。
+    //   wr_win_m 在读侧是"整段复位"（清读 FIFO + 行游标归零），只属于帧首；
+    //   但出队/突发完全可以放在任意时刻：写突发本来就被 wq 限速成
+    //   每 64 拍一次 4 字，读侧只用掉约 9% 带宽，1024 字的读 FIFO 足够吸收。
+    //   旧写法把两者绑在一起，导致读一张图时源被限成"每帧 256 像素"，
+    //   一张 960x540 要等上千帧（这就是切图几十秒的根因）。
+    assign wf_rd = ~wf_empty & ~a_vld & ~wfly;
     assign wpop  = wf_rd;
 
     wire [31:0] bsel = (bi == 2'd0) ? bb0 :
@@ -281,7 +287,7 @@ module frame_buffer #(
                 end
             end else if (bgap != 4'd0) begin
                 bgap <= bgap - 4'd1;
-            end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy && wr_win_m &&
+            end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy &&
                          (rq == 6'd63) && ~rburst) begin
                 bsend <= 1'b1;
                 bi    <= 2'd0;

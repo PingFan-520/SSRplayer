@@ -251,8 +251,6 @@ module top_board #(
     reg         sc_clr;               // 换图前清屏（把整个 640x480 框写黑）
     wire        sc_clr_done, sc_clr_busy;
 
-    wire       fb_load_mode;       // 给帧缓存的写窗口开关（见下面的 assign）
-
     frame_buffer #(
         .FB_W(1280), .FB_H(720), .VACTIVE(720),
         .WR_LINES(16), .V_OFFSET(V_OFF),
@@ -286,7 +284,7 @@ module top_board #(
         .x       (raw_x),
         .y       (raw_y),
         .rd_buf  (1'b0),
-        .load_mode(fb_load_mode),
+        .load_mode(load_mode),
         .rd_bank (rd_bank),
         .rd_bank_new(rd_bank_new),
         .rd_wipe (rd_wipe),
@@ -1134,15 +1132,6 @@ module top_board #(
         end
     end
 
-    // ------------------------------------------------------------------
-    // 帧缓存写窗口：正常只开"帧首 16 行"（WR_LINES=16），写 FIFO 靠这点
-    // 时间排空。但读图时源一直往 FIFO 里灌（一个 4KB 簇 ≈ 1365 像素），
-    // FIFO 一到 64 就把 reader 挡在 S_GAP 上，只能等下一帧的消隐期 ——
-    // 一张 960x540 要等上千帧，这才是"一次切图几十秒"的真正来源。
-    // 所以：reader 一旦被 FIFO 挡住（fu>=64），立刻把整帧写窗口打开让它
-    // 排空；不挡的时候维持原样，显示侧读通路完全不受影响。
-    // ------------------------------------------------------------------
-    assign fb_load_mode = load_mode | ((ld_st == LD_LOAD) && (fb_wf_used >= 9'd64));
 
     // ------------------------------------------------------------------
     // 画面 + 菜单
