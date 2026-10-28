@@ -243,7 +243,6 @@ module top_board #(
     wire        sc_we;
     wire        sc_busy;
     wire        sc_full;             // 这张图是否铺满整块（= 换图时不必清屏）
-    reg         last_full;           // 上一张是否铺满
     wire [11:0] sc_x, sc_y;
     wire [15:0] sc_rgb;
     wire [7:0]  fb_rd_drop;           // 读通路丢字计数（>0 就会纵向错行）
@@ -680,14 +679,6 @@ module top_board #(
     reg        reinit_pulse;
     reg [7:0]  wait_hold;       // 自愈重试后 LD_WAIT 的静默期（约 6.8us，只为跳过指示信号的 2~3 拍滞后）
 
-    // 每张图加载完后记下"它有没有铺满整块"。下一张换图时，如果上一张是满屏，
-    // 说明旧图的每个像素都会被新图覆盖 —— 不用清屏，省掉 0.65s 的全屏写黑。
-    // 万一下一张是小图（有黑边），那一次会露出旧图，但加载完 last_full 变 0，
-    // 之后就恢复清屏，属于自愈。
-    always @(posedge clk_pix or negedge rst_n) begin
-        if (!rst_n)                          last_full <= 1'b0;
-        else if (ld_st == LD_LOAD)           last_full <= sc_full;
-    end
 
     // ------------------------------------------------------------------
     // 切图决策：手动（KEY1/KEY2）优先、自动（菜单 AUT）按档位计时。
@@ -1078,18 +1069,15 @@ module top_board #(
                         load_cnt  <= 4'd0;     // 新一次切图，重新计数
                         ld_retry  <= 1'b0;     // 新一次切图，允许自愈重试
                         fin_dly   <= 13'd0;
-                        if (last_full) begin
-                            // 上一张铺满整块 -> 新图会覆盖全部像素，清屏纯属浪费
-                            // （清屏要写 518400 个像素，约 0.65s）
-                            sc_clr    <= 1'b0;
-                            clr_ok    <= 1'b1;     // 当作"已经清过"，跳过 LD_CLEAR
-                            ld_st     <= LD_ARM;
-                        end else begin
-                            sc_clr    <= 1'b1;
-                            clr_ok    <= 1'b0;
-                            clr_wdog  <= 26'd0;
-                            ld_st     <= LD_CLEAR;
-                        end
+                        // ★ 每张图都清屏，不再"上一张铺满就跳过"。
+                        //   跳过的前提是"新图一定覆盖全部像素"，可一旦新图不满屏
+                        //   （缩放档位 / 源图偏小 / 留边），旧图就会残留在新图后面。
+                        //   写通路改造后清屏只要 ~35ms（518400 像素，写 FIFO 连续出队），
+                        //   相对 1.3s 的读图可以忽略，所以无条件清屏最稳。
+                        sc_clr    <= 1'b1;
+                        clr_ok    <= 1'b0;
+                        clr_wdog  <= 26'd0;
+                        ld_st     <= LD_CLEAR;
                     end else if (dbg_scale != scale_d) begin
                         // 菜单“缩放”只在加载阶段生效，光改档位看不出变化。
                         // 这里检测到档位变化就重载当前这张（约 0.5s 后就能看到新效果），
