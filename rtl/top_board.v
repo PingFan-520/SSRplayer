@@ -746,6 +746,7 @@ module top_board #(
                         sc_clr   <= 1'b1;     // 先清屏，再开始读图
                         clr_ok   <= 1'b0;
                         clr_wdog <= 26'd0;
+                        ld_wdog  <= 28'd0;    // 进度计时从这一刻开始
                         fin_dly  <= 13'd0;
                         ld_st    <= LD_CLEAR;
                     end
@@ -755,6 +756,8 @@ module top_board #(
                 // 153600 字，只在写窗口里跑，约 57ms（首张 load_mode=1 时约 20ms）。
                 LD_CLEAR: begin
                     sc_clr <= 1'b0;
+                    // 清屏也要走 0.6s，这段时间进度条必须动，否则用户以为卡住
+                    if (ld_wdog != 28'hFFFFFFF) ld_wdog <= ld_wdog + 28'd1;
                     // 清屏结束还要等写 FIFO 排空：清屏最后那 256 个字可能正卡在
                     // 写窗口外。FIFO 满着就开读的话，刚开始的像素会被丢掉。
                     //
@@ -779,8 +782,7 @@ module top_board #(
                 // 避免多比特总线正在变化时被采样。
                 LD_ARM: begin
                     if (fin_dly == 13'd16) begin
-                        rd_en    <= 1'b1;
-                        ld_wdog  <= 28'd0;
+                        rd_en    <= 1'b1;      // ld_wdog 不清零：接着清屏的计时走
                         fin_dly  <= 13'd0;
                         ld_st    <= LD_LOAD;
                     end else begin
@@ -982,6 +984,7 @@ module top_board #(
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
                         clr_wdog  <= 26'd0;
+                        ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end else if (dbg_scale != scale_d) begin
@@ -993,6 +996,7 @@ module top_board #(
                         sc_clr    <= 1'b1;
                         clr_ok    <= 1'b0;
                         clr_wdog  <= 26'd0;
+                        ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end
@@ -1081,9 +1085,13 @@ module top_board #(
     //   一堆进位链），把布局推到临界、phy_1 单点布线冲突布不通，已废弃。
     //   读图速率是恒定的（25MHz SPI），所以按时间走和按像素走差别 <10%。
     // ------------------------------------------------------------------
+    wire        ld_busy = (ld_st == LD_CLEAR) || (ld_st == LD_ARM) ||
+                          (ld_st == LD_LOAD);
+
     reg        wd19_d;
     reg  [3:0] prog_t, prog_u;               // 十位 / 个位（BCD）
     wire       prog_tick = ld_wdog[19] & ~wd19_d;
+    wire       prog_top  = (prog_t == 4'd9) && (prog_u == 4'd9);
 
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -1092,13 +1100,19 @@ module top_board #(
             prog_u <= 4'd0;
         end else begin
             wd19_d <= ld_wdog[19];
-            if (ld_st == LD_CLEAR) begin          // 每次换图从 00 起
+            if (sc_clr) begin
+                // 切图那一拍清零（sc_clr 是单拍脉冲）。
+                // 不能用 "ld_st == LD_CLEAR"：清屏要跑 0.6s，那样整段都是 00，
+                // 用户按下去看到的还是 00，以为没收到指令。
                 prog_t <= 4'd0;
                 prog_u <= 4'd0;
-            end else if (prog_tick && (ld_st == LD_LOAD)) begin
+            end else if (prog_tick && ld_busy && !prog_top) begin
+                // ★ 封顶必须是"十位个位都是 9 就整条停住"。
+                //   旧写法只判了个位：到 99 后个位归 0、十位不再加 -> 掉回 90，
+                //   再数到 99，每 126ms 循环一次，看起来就是"98/99 来回跳、卡住不动"。
                 if (prog_u == 4'd9) begin
                     prog_u <= 4'd0;
-                    if (prog_t != 4'd9) prog_t <= prog_t + 4'd1;   // 封顶 99
+                    prog_t <= prog_t + 4'd1;
                 end else begin
                     prog_u <= prog_u + 4'd1;
                 end
@@ -1106,8 +1120,6 @@ module top_board #(
         end
     end
 
-    wire        ld_busy = (ld_st == LD_CLEAR) || (ld_st == LD_ARM) ||
-                          (ld_st == LD_LOAD);
     wire [7:0]  dbg_head = ld_busy ? {prog_t, prog_u} : fb_rd_drop;
 
     wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
