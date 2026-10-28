@@ -480,6 +480,7 @@ module top_board #(
 
     // 读失败标志跨到像素域（电平，打两拍）
     wire       rdr_err;            // 读失败（扇区重试用尽）
+    wire [3:0] rdr_err_st;         // 出错时的 reader 状态快照（诊断）
     reg        err_s1, err_s2;
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin err_s1 <= 1'b0; err_s2 <= 1'b0; end
@@ -519,6 +520,7 @@ module top_board #(
         .busy         (rdr_busy),
         .done         (rdr_done),
         .err          (rdr_err),
+        .err_st       (rdr_err_st),
 
         .byte_data    (sd_byte),
         .byte_valid   (sd_byte_vld)
@@ -679,6 +681,7 @@ module top_board #(
     //   reinit_pulse 交给下面 boot_tmr 那一段去拉 sd_reinit。
     reg        ld_retry;
     reg        reinit_pulse;
+    reg [19:0] wait_hold;       // 自愈重试后 LD_WAIT 的静默期（等 SD 段重挂载）
 
     // 每张图加载完后记下"它有没有铺满整块"。下一张换图时，如果上一张是满屏，
     // 说明旧图的每个像素都会被新图覆盖 —— 不用清屏，省掉 0.65s 的全屏写黑。
@@ -813,6 +816,7 @@ module top_board #(
             load_cnt  <= 4'd0;
             ld_retry  <= 1'b0;
             reinit_pulse <= 1'b0;
+            wait_hold <= 20'd0;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
@@ -831,7 +835,13 @@ module top_board #(
 
             case (ld_st)
                 LD_WAIT: begin
-                    if (sd_ready && scan_done_p && (img_total_p != 8'd0)) begin
+                    // ★ 复位 SD 段之后不能马上信 sd_ready/scan_done：
+                    //   这两个信号要 2~3 拍才会落下来，自愈重试时如果立刻放行，
+                    //   会拿着"还没挂载"的 fat_lba/data_lba 去读图，必错。
+                    //   所以给一段 28ms 的静默期，之后还要等 sd_ready 重新起来。
+                    if (wait_hold != 20'd0) begin
+                        wait_hold <= wait_hold - 20'd1;
+                    end else if (sd_ready && scan_done_p && (img_total_p != 8'd0)) begin
                         sc_clr   <= 1'b1;     // 先清屏，再开始读图
                         clr_ok   <= 1'b0;
                         clr_wdog <= 26'd0;
@@ -902,12 +912,14 @@ module top_board #(
                     if (((rdr_err_p && rdr_done_p) || ld_tmo) && !ld_retry) begin
                         ld_retry     <= 1'b1;
                         reinit_pulse <= 1'b1;
+                        wait_hold    <= 20'hFFFFF;   // 28ms 静默期，等 SD 段复位+重挂载
                         rd_en        <= 1'b0;
                         fin_dly      <= 13'd0;
                         ld_st        <= LD_WAIT;
                     end else if (rdr_err_p && rdr_done_p) begin
                         rd_en     <= 1'b0;
                         fin_dly   <= 13'd0;
+                        wait_hold <= 20'hFFFFF;
                         ld_st     <= first_img ? LD_WAIT : LD_SHOW;
                     end else if ((rdr_done_p && wr_idle_p && !in_img_row) ||
                         ld_tmo) begin
@@ -1238,9 +1250,10 @@ module top_board #(
         end
     end
 
-    //   加载中：读图进度；静止：最左位 = 本次切图加载了几次，第二位 = 读通路丢字
+    //   加载中：读图进度；静止：最左位 = 本次切图加载了几次，
+    //   第二位 = 出错时 reader 卡在哪个状态（0 = 本次没出错）
     wire [7:0]  dbg_head = ld_busy ? {prog_t, prog_u}
-                                   : {load_cnt, fb_rd_drop[3:0]};
+                                   : {load_cnt, rdr_err_st};
 
     wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
                         : (mnt_err  != 8'd0) ? {dbg_head, 4'hE, mnt_err, 8'h00}

@@ -426,7 +426,7 @@ module fat_scan #(
     reg [3:0]  st;
     assign dbg_st = st;
 
-    // 扇区级超时 + 重试。原来 S_WT 等 rd_busy、S_RCV 等 256 个字都没有退路：
+    // 扇区级超时 + 重试（21ms 量级，远大于任何正常等待）。原来 S_WT 等 rd_busy、S_RCV 等 256 个字都没有退路：
     // 只要有一次请求没被受理、或者 SPI 丢了字节，就会永远停在这里，
     // 上层只能等 7 秒看门狗（上板现象：进度 0→99 反复重来、一次切图要 30 秒）。
     reg [15:0] wto;             // 等待计数（2.6ms @25MHz）
@@ -726,6 +726,7 @@ module sd_bmp_reader (
     output reg         busy,
     output reg         done,
     output reg         err,            // 1 = 本次加载有扇区读失败（重试用尽）
+    output reg  [3:0]  err_st,         // 出错时的状态快照（诊断，0 = 本次没出错）
 
     // ---- 字节流输出 ----
     output reg  [7:0]  byte_data,
@@ -746,16 +747,22 @@ module sd_bmp_reader (
     reg [3:0]  st;
     assign dbg_st = st;
 
-    // 扇区级超时 + 重试。原来 S_WT 等 rd_busy、S_RCV 等 256 个字都没有退路：
+    // 扇区级超时 + 重试（21ms 量级，远大于任何正常等待）。原来 S_WT 等 rd_busy、S_RCV 等 256 个字都没有退路：
     // 只要有一次请求没被受理、或者 SPI 丢了字节，就会永远停在这里，
     // 上层只能等 7 秒看门狗（上板现象：进度 0→99 反复重来、一次切图要 30 秒）。
-    reg [15:0] wto;             // 等待计数（2.6ms @25MHz）
+    reg [19:0] wto;             // 等待计数（21ms @25MHz，故意放宽：正常等待可能跨帧）
     reg [1:0]  retry;           // 本扇区重试次数
     reg        bsy;
     reg [8:0]  word_cnt;
     reg [9:0]  bcnt;
     reg        pend_v;
     reg [7:0]  pend;
+
+    // 错误现场快照：出错那一拍 reader 停在哪个状态，显示在数码管第 2 位。
+    //   1=TBL 2=CMD 3=WT 4=RCV 5=GAP 6=F0 7=F1 8=F2（0=本次加载没出错）
+    //   st_d = st 打一拍；err 起来那拍 st 已经跳回 S_IDLE 了，所以取 st_d。
+    //   （err_st 本身是端口，已在端口表里声明为 reg）
+    reg [3:0]  st_d;
 
     reg [1:0]  pretry;          // FAT 扇区（簇链）重试次数
     reg [31:0] cur_clus;
@@ -805,7 +812,7 @@ module sd_bmp_reader (
             rd_sec_addr <= 32'd0;
             bsy         <= 1'b0;
             err         <= 1'b0;
-            wto         <= 16'd0;
+            wto         <= 20'd0;
             retry       <= 2'd0;
             pretry      <= 2'd0;
             word_cnt    <= 9'd0;
@@ -826,8 +833,12 @@ module sd_bmp_reader (
             byte_valid  <= 1'b0;
             tbl_req     <= 1'b0;
             tbl_rec     <= 6'd0;
+            st_d        <= S_IDLE;
+            err_st      <= 4'd0;
         end else begin
             byte_valid <= 1'b0;
+            st_d       <= st;
+            if (err) err_st <= st_d;      // err 起来那拍 st 已跳回 S_IDLE，取打一拍的
 
             if (!en_s2) begin
                 started <= 1'b0;
@@ -857,9 +868,10 @@ module sd_bmp_reader (
                         tbl_req <= 1'b1;
                         busy    <= 1'b1;
                         err     <= 1'b0;        // 每次新加载清错误标志
+                        err_st  <= 4'd0;        // 顺带清错误现场快照
                         retry   <= 2'd0;
                         pretry  <= 2'd0;
-                        wto     <= 16'd0;
+                        wto     <= 20'd0;
                         st      <= S_TBL;
                     end
                 end
@@ -874,7 +886,7 @@ module sd_bmp_reader (
                         bcnt       <= 10'd0;
                         word_cnt   <= 9'd0;
                         bsy        <= 1'b0;
-                        wto        <= 16'd0;
+                        wto        <= 20'd0;
                         if ((tbl_data[31:0] < 32'd2) || (tbl_data[31:0] >= 32'h0FFFFFF8) ||
                             (tbl_data[63:32] == 32'd0)) begin
                             busy <= 1'b0;
@@ -886,8 +898,8 @@ module sd_bmp_reader (
                     end else begin
                         // ★ 等文件表也要有退路：BRAM 仲裁万一没服务到，
                         //   原来会永久停在 S_TBL，done 永远不来 -> 上层等到看门狗。
-                        wto <= wto + 16'd1;
-                        if (wto == 16'hFFFF) begin
+                        wto <= wto + 20'd1;
+                        if (wto == 20'h7FFFF) begin
                             tbl_req <= 1'b0;
                             err     <= 1'b1;
                             busy    <= 1'b0;
@@ -903,7 +915,7 @@ module sd_bmp_reader (
                         rd_sec_addr <= data_lba + ((cur_clus - 32'd2) << spc_log2) + {24'd0, sec_in};
                         rd_start_en <= 1'b1;
                         data_sector <= 1'b1;
-                        wto         <= 16'd0;
+                        wto         <= 20'd0;
                         st          <= S_WT;
                     end
                 end
@@ -912,12 +924,12 @@ module sd_bmp_reader (
                     if (rd_busy) begin
                         rd_start_en <= 1'b0;
                         bsy         <= 1'b1;
-                        wto         <= 16'd0;
+                        wto         <= 20'd0;
                         st          <= S_RCV;
                     end else begin
                         // 请求发出去 2.6ms 还没看到 busy：撤掉重发
-                        wto <= wto + 16'd1;
-                        if (wto == 16'hFFFF) begin
+                        wto <= wto + 20'd1;
+                        if (wto == 20'h7FFFF) begin
                             rd_start_en <= 1'b0;
                             if (retry == 2'd3) begin
                                 // 连续 4 次都没受理：放弃本次加载
@@ -936,7 +948,7 @@ module sd_bmp_reader (
 
                 S_RCV: begin
                     if (rd_val_en) begin
-                        wto <= 16'd0;                  // 有数据就重置超时
+                        wto <= 20'd0;                  // 有数据就重置超时
                         word_cnt <= word_cnt + 9'd1;
                         if (word_cnt == 9'd255) begin
                             bsy   <= 1'b0;
@@ -969,8 +981,8 @@ module sd_bmp_reader (
                         end
                     end else begin
                         // 收到一半卡住了：可能已经错位，直接判失败
-                        wto <= wto + 16'd1;
-                        if (wto == 16'hFFFF) begin
+                        wto <= wto + 20'd1;
+                        if (wto == 20'h7FFFF) begin
                             retry <= 2'd0;
                             err   <= 1'b1;
                             bsy   <= 1'b0;
@@ -988,17 +1000,14 @@ module sd_bmp_reader (
                             done <= 1'b1;
                             st   <= S_IDLE;
                         end else if (fu_s2 >= 9'd64) begin
-                            // ★ 等写 FIFO 消化。原来没有超时：万一画面通路停了
-                            //   （fifo 一直 >=64），reader 永远停在这里，done 不来。
-                            wto <= wto + 16'd1;
-                            if (wto == 16'hFFFF) begin
-                                err  <= 1'b1;
-                                busy <= 1'b0;
-                                done <= 1'b1;
-                                st   <= S_IDLE;
-                            end
+                            // ★ 这里**不能加短超时**：写 FIFO 是"画面消隐期才排空"的，
+                            //   一次正常的等待就可能跨一整帧（33ms）。
+                            //   上板实测：加 2.6ms 超时 -> 每个扇区都判失败，
+                            //   图片再也不换（数码管 204911）。
+                            //   真的卡死由上层的 ld_tmo(3.4s) 兜底。
+                            wto <= 20'd0;
                         end else begin
-                            wto <= 16'd0;
+                            wto <= 20'd0;
                             bytes_left <= bytes_left - 32'd512;
                             if (sec_in + 8'd1 < (8'd1 << spc_log2)) begin
                                 sec_in   <= sec_in + 8'd1;
@@ -1023,7 +1032,7 @@ module sd_bmp_reader (
                         bcnt        <= 10'd0;
                         bsy         <= 1'b0;
                         nxt_clus    <= 32'hFFFFFFFF;
-                        wto         <= 16'd0;
+                        wto         <= 20'd0;
                         data_sector <= 1'b0;
                         st          <= S_F1;
                     end
@@ -1033,13 +1042,13 @@ module sd_bmp_reader (
                     if (rd_busy) begin
                         rd_start_en <= 1'b0;
                         bsy         <= 1'b1;
-                        wto         <= 16'd0;
+                        wto         <= 20'd0;
                         st          <= S_F2;
                     end else begin
                         // ★ 请求没被受理（总线上还有别人的传输）：撤掉重试。
                         //   没有这个超时的话，一次被吞就是永久挂死。
-                        wto <= wto + 16'd1;
-                        if (wto == 16'hFFFF) begin
+                        wto <= wto + 20'd1;
+                        if (wto == 20'h7FFFF) begin
                             rd_start_en <= 1'b0;
                             if (pretry == 2'd3) begin
                                 pretry <= 2'd0;
@@ -1059,7 +1068,7 @@ module sd_bmp_reader (
                     if (fav) begin
                         fav     <= 1'b0;
                         pretry  <= 2'd0;
-                        wto     <= 16'd0;
+                        wto     <= 20'd0;
                         if ((nxt_clus >= 32'h0FFFFFF8) || (nxt_clus < 32'd2)) begin
                             busy <= 1'b0;
                             done <= 1'b1;
@@ -1072,7 +1081,7 @@ module sd_bmp_reader (
                         end
                     end
                     if (bsy && byte_en) begin
-                        wto <= 16'd0;
+                        wto <= 20'd0;
                         if (bcnt == foff[9:0])         nxt_clus[7:0]   <= byte_d;
                         if (bcnt == foff[9:0] + 10'd1) nxt_clus[15:8]  <= byte_d;
                         if (bcnt == foff[9:0] + 10'd2) nxt_clus[23:16] <= byte_d;
@@ -1086,8 +1095,8 @@ module sd_bmp_reader (
                     end else begin
                         // ★ 这一扇区没收到数据（busy 不来 / 半截断流）也要退出来，
                         //   否则 fav 永远不会置起，簇链就断在这里。
-                        wto <= wto + 16'd1;
-                        if (wto == 16'hFFFF) begin
+                        wto <= wto + 20'd1;
+                        if (wto == 20'h7FFFF) begin
                             err  <= 1'b1;
                             bsy  <= 1'b0;
                             busy <= 1'b0;
