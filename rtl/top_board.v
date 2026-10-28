@@ -660,6 +660,12 @@ module top_board #(
     reg [25:0] clr_wdog;        // 清屏看门狗（26 位 = 1.8s）
     reg [27:0] ld_wdog;         // 加载看门狗（28 位 = 7.1s，720p 一张约 0.88s）
 
+    // 诊断：本次切图一共进了几次 LD_LOAD。
+    //   每次按键/自动切图清零，在静止态显示在数码管最左一位。
+    //   01 = 只加载了一次（那"0→99 反复"就只是进度显示问题）
+    //   03 = 真的反复加载了 3 次
+    reg [3:0]  load_cnt;
+
     // 每张图加载完后记下"它有没有铺满整块"。下一张换图时，如果上一张是满屏，
     // 说明旧图的每个像素都会被新图覆盖 —— 不用清屏，省掉 0.65s 的全屏写黑。
     // 万一下一张是小图（有黑边），那一次会露出旧图，但加载完 last_full 变 0，
@@ -751,6 +757,7 @@ module top_board #(
             clr_ok    <= 1'b0;
             clr_wdog  <= 24'd0;
             ld_wdog   <= 28'd0;
+            load_cnt  <= 4'd0;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
@@ -810,6 +817,7 @@ module top_board #(
                     if (fin_dly == 13'd16) begin
                         rd_en    <= 1'b1;      // ld_wdog 不清零：接着清屏的计时走
                         fin_dly  <= 13'd0;
+                        if (load_cnt != 4'hF) load_cnt <= load_cnt + 4'd1;
                         ld_st    <= LD_LOAD;
                     end else begin
                         fin_dly <= fin_dly + 13'd1;
@@ -1016,6 +1024,7 @@ module top_board #(
                         // 否则清屏会把用户正在看的图画黑（上板见过"半帧撕裂再黑屏"）。
                         if (USE_DBL[0] && (wr_bank == rd_bank)) wr_bank <= ~rd_bank;
                         ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
+                        load_cnt  <= 4'd0;     // 新一次切图，重新计数
                         fin_dly   <= 13'd0;
                         if (last_full) begin
                             // 上一张铺满整块 -> 新图会覆盖全部像素，清屏纯属浪费
@@ -1039,6 +1048,7 @@ module top_board #(
                         clr_ok    <= 1'b0;
                         clr_wdog  <= 26'd0;
                         ld_wdog   <= 28'd0;    // 进度计时从这一刻开始
+                        load_cnt  <= 4'd0;
                         fin_dly   <= 13'd0;
                         ld_st     <= LD_CLEAR;
                     end
@@ -1162,7 +1172,9 @@ module top_board #(
         end
     end
 
-    wire [7:0]  dbg_head = ld_busy ? {prog_t, prog_u} : fb_rd_drop;
+    //   加载中：读图进度；静止：最左位 = 本次切图加载了几次，第二位 = 读通路丢字
+    wire [7:0]  dbg_head = ld_busy ? {prog_t, prog_u}
+                                   : {load_cnt, fb_rd_drop[3:0]};
 
     wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
                         : (mnt_err  != 8'd0) ? {dbg_head, 4'hE, mnt_err, 8'h00}

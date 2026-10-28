@@ -1037,6 +1037,21 @@ module sd_bmp_reader (
 
                 default: st <= S_IDLE;
             endcase
+
+            // ★ 上层撤了 enable：强制回空闲。
+            //   原来只清 started/done，st 会留在 S_RCV / S_GAP / S_WT 里；
+            //   下一次 enable 拉高时进不了 S_IDLE，加载永远起不来，
+            //   只能靠 3.4s 看门狗超时 —— 表现就是"切图反复失败、间隔几十秒"。
+            if (!en_s2 && (st != S_IDLE)) begin
+                st          <= S_IDLE;
+                rd_start_en <= 1'b0;
+                bsy         <= 1'b0;
+                busy        <= 1'b0;
+                pend_v      <= 1'b0;
+                tbl_req     <= 1'b0;
+                word_cnt    <= 9'd0;
+                retry       <= 2'd0;
+            end
         end
     end
 
