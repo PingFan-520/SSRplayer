@@ -1068,57 +1068,13 @@ module top_board #(
         end
     end
 
-    // 数码管（6 位，左->右）：
-    //   读图进度/丢字 | 图片数 | {ld_st,sd_ready} | 挂载状态 | 扫描状态
-    //   静止正常: 0 0 3 9 0 8
-    //   读图中  : 4 7 3 7 0 8   （47% / 3 张 / LOAD / 挂载完 / 扫描完）
-    //   扫描错  : .. F 3 ..     挂载错: .. E 1 ..
-    // ------------------------------------------------------------------
-    // 读图进度：最左两位显示 0~99（%），比在画面上画进度条干净。
-    //   上板反馈"按切换键后没反应，不知道是在读图还是没收到指令"：
-    //   按下之后要经过 清屏(≈0.1s) + SD 读整张图(≈1s) + 淡入(0.27s)，
-    //   这段时间画面本来就不会变，数码管上能看到百分比在涨就说明在干活。
-    //
-    //   满幅 518400 像素 = 5184 x 100，所以"每 5184 个像素进 1%"，
-    //   用一个小计数器 + 两位 BCD 递增即可，全程没有乘法器、没有除法器。
-    // ------------------------------------------------------------------
-    reg [12:0] prog_sub;                     // 0..5183
-    reg [3:0]  prog_t, prog_u;               // 十位 / 个位（BCD）
-
-    always @(posedge clk_pix or negedge rst_n) begin
-        if (!rst_n) begin
-            prog_sub <= 13'd0;
-            prog_t   <= 4'd0;
-            prog_u   <= 4'd0;
-        end else if (ld_st == LD_ARM) begin
-            prog_sub <= 13'd0;               // 每次加载从 00 开始
-            prog_t   <= 4'd0;
-            prog_u   <= 4'd0;
-        end else if (sc_we && (ld_st == LD_LOAD)) begin
-            if (prog_sub == 13'd5183) begin
-                prog_sub <= 13'd0;
-                if (prog_u == 4'd9) begin
-                    prog_u <= 4'd0;
-                    if (prog_t != 4'd9) prog_t <= prog_t + 4'd1;   // 封顶 99
-                end else begin
-                    prog_u <= prog_u + 4'd1;
-                end
-            end else begin
-                prog_sub <= prog_sub + 13'd1;
-            end
-        end
-    end
-
-    wire        ld_busy = (ld_st == LD_CLEAR) || (ld_st == LD_ARM) ||
-                          (ld_st == LD_LOAD);
-
-    //   最左两位：加载中 = 读图进度 00~99；空闲 = 读通路丢字计数（正常 00）
-    //   中间四位：图片数 | {ld_st, sd_ready} | 挂载状态 | 扫描状态
-    wire [7:0] dbg_head = ld_busy ? {prog_t, prog_u} : fb_rd_drop;
-
-    wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
-                        : (mnt_err  != 8'd0) ? {dbg_head, 4'hE, mnt_err, 8'h00}
-                        : { dbg_head, img_total_p[3:0], ld_st, sd_ready,
+    // 数码管（左->右）：图片数 | {ld_st,sd_ready} | mnt_st | scan_st | 0 0
+    //   正常:  3 9 0 8 0 0   （3 张图 / SHOW / 挂载完 / 扫描完）
+    //   卡在挂载: 0 1 1 3 0 0 （S_M0 / S_RCV）
+    //   扫描错:  F 3 ...    挂载错: E 1 ...
+    wire [23:0] dbg_ext = (scan_err != 8'd0) ? {fb_rd_drop, 4'hF, scan_err, 8'h00}
+                        : (mnt_err  != 8'd0) ? {fb_rd_drop, 4'hE, mnt_err, 8'h00}
+                        : { fb_rd_drop, img_total_p[3:0], ld_st, sd_ready,
                             1'b0, mnt_st, scan_st };
 
     wire        menu_open;
