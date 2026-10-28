@@ -237,6 +237,20 @@ module osd_menu #(
     reg [1:0]  r_page;
     reg [2:0]  r_item;
 
+    // 淡入淡出：mfade 0=全透明 8=不透明，每帧走 1 级（30fps 下 8 帧 ≈ 0.27s）
+    //   r_open 立刻跟随 open（它只决定"要不要画"），mfade 慢慢跟；
+    //   换页（二级菜单）时先淡出到 0 再换 r_page，看起来就是"暗下去再亮起来"。
+    reg [3:0] mfade;
+    wire      page_chg = (r_page != page);
+    always @(posedge clk or posedge rst) begin
+        if (rst) mfade <= 4'd0;
+        else if (frame_start) begin
+            if (!open || page_chg) mfade <= (mfade == 4'd0) ? 4'd0 : mfade - 4'd1;
+            else                   mfade <= (mfade == 4'd8) ? 4'd8 : mfade + 4'd1;
+        end
+    end
+    wire mvis = r_open | (mfade != 4'd0);      // 渲染用：淡出期间继续画
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             r_open <= 1'b0;
@@ -244,8 +258,12 @@ module osd_menu #(
             r_item <= 3'd0;
         end else if (frame_start) begin
             r_open <= open;
-            r_page <= page;
-            r_item <= item;
+            // 淡到全透明才换页/换行：换页瞬间看不见，不会"半透明时内容突然换掉"；
+            // 正常显示时 mfade 恒为 8，所以光标移动仍然逐帧跟手。
+            if (mfade == 4'd0) begin
+                r_page <= page;
+                r_item <= item;
+            end
         end
     end
 
@@ -757,6 +775,7 @@ module osd_menu #(
     // 第一级：区域底色 + 文本请求
     // ------------------------------------------------------------------
     reg        s0_text;
+    reg        s0_tmenu;
     reg [5:0]  s0_glyph;
     reg [3:0]  s0_frow;
     reg [3:0]  s0_fcol;
@@ -781,13 +800,13 @@ module osd_menu #(
         end
 
         // ---- 字幕条底色（菜单关着才显示）----
-        if (!r_open && v_sub && sub_bar) begin
+        if (!mvis && v_sub && sub_bar) begin
             s0_base_rgb   = 24'h00_00_00;
             s0_base_alpha = 4'd4;                  // 25% 黑，文字清晰又不挡图
         end
 
         // ---- 菜单底色 ----
-        if (r_open) begin
+        if (mvis) begin
             if (!in_panel) begin
                 s0_base_rgb   = C_MASK;
                 s0_base_alpha = 4'd3;              // 全屏 37.5% 黑遮罩
@@ -801,29 +820,38 @@ module osd_menu #(
                 s0_base_rgb   = C_PANEL;
                 s0_base_alpha = 4'd8;
             end
+            // 淡入淡出：整层（遮罩/边框/面板/高亮）按 mfade(0..8) 缩放透明度
+            //   ★ 必须显式补到 8 位：Verilog 乘法结果宽度 = max(操作数宽度)，
+            //     4 位 x 4 位 会先截成 4 位（8*8=64 -> 0），再右移就只剩 0/1。
+            s0_base_alpha = ({4'd0, s0_base_alpha} * {4'd0, mfade}) >> 3;
         end
 
         // ---- 文本：菜单优先，其次字幕 ----
-        if (r_open && title_hv) begin
+        s0_tmenu = 1'b0;                       // 0 = 字幕/告警（不参与淡入淡出）
+        if (mvis && title_hv) begin
             s0_text   = 1'b1;
+            s0_tmenu  = 1'b1;
             s0_glyph  = g_title(r_page, tcx[6:5]);
             s0_fcol   = tcx[4:1];
             s0_frow   = (y - (py0_cur + 24)) >> 1;
             s0_tcolor = C_TITLE;
-        end else if (r_open && label_hv) begin
+        end else if (mvis && label_hv) begin
             s0_text   = 1'b1;
+            s0_tmenu  = 1'b1;
             s0_glyph  = g_label(r_page, ridx, lcx[6:5], mus_total[2:0]);
             s0_fcol   = lcx[4:1];
             s0_frow   = row_fr;
             s0_tcolor = C_LABEL;
-        end else if (r_open && value_hv) begin
+        end else if (mvis && value_hv) begin
             s0_text   = 1'b1;
+            s0_tmenu  = 1'b1;
             s0_glyph  = g_val(r_page, ridx, vcx[7:5], row_val, mus_total[2:0]);
             s0_fcol   = vcx[4:1];
             s0_frow   = row_fr;
             s0_tcolor = C_VALUE;
-        end else if (r_open && hint_hv) begin
+        end else if (mvis && hint_hv) begin
             s0_text   = 1'b1;
+            s0_tmenu  = 1'b1;
             s0_glyph  = g_hint(hcx[8:4]);
             s0_fcol   = hcx[3:0];
             s0_frow   = y - (py0_cur + ph_cur - 28);
@@ -834,7 +862,7 @@ module osd_menu #(
             s0_fcol   = x[4:1];
             s0_frow   = (y - 12'd600) >> 1;
             s0_tcolor = 24'hFF_60_60;
-        end else if (!r_open && v_sub && sub_hv) begin
+        end else if (!mvis && v_sub && sub_hv) begin
             s0_text   = 1'b1;
             s0_glyph  = g_sub(sub_tx[10:5], mus_name, (v_mus != 3'd0));
             s0_fcol   = sub_tx[4:1];
@@ -847,6 +875,7 @@ module osd_menu #(
     // 第二级：字模 ROM
     // ------------------------------------------------------------------
     reg        s1_text;
+    reg        s1_tmenu;
     reg [3:0]  s1_fcol;
     reg [23:0] s1_tcolor;
     reg [23:0] s1_base_rgb;
@@ -855,12 +884,14 @@ module osd_menu #(
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             s1_text       <= 1'b0;
+            s1_tmenu      <= 1'b0;
             s1_fcol       <= 4'd0;
             s1_tcolor     <= 24'd0;
             s1_base_rgb   <= 24'd0;
             s1_base_alpha <= 4'd0;
         end else begin
             s1_text       <= s0_text;
+            s1_tmenu      <= s0_tmenu;
             s1_fcol       <= s0_fcol;
             s1_tcolor     <= s0_tcolor;
             s1_base_rgb   <= s0_base_rgb;
@@ -893,6 +924,7 @@ module osd_menu #(
 
     // 标志位再补一拍，与 BRAM 输出同拍
     reg        s2_text;
+    reg        s2_tmenu;
     reg [3:0]  s2_fcol;
     reg [23:0] s2_tcolor;
     reg [23:0] s2_base_rgb;
@@ -901,12 +933,14 @@ module osd_menu #(
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             s2_text       <= 1'b0;
+            s2_tmenu      <= 1'b0;
             s2_fcol       <= 4'd0;
             s2_tcolor     <= 24'd0;
             s2_base_rgb   <= 24'd0;
             s2_base_alpha <= 4'd0;
         end else begin
             s2_text       <= s1_text;
+            s2_tmenu      <= s1_tmenu;
             s2_fcol       <= s1_fcol;
             s2_tcolor     <= s1_tcolor;
             s2_base_rgb   <= s1_base_rgb;
@@ -925,9 +959,10 @@ module osd_menu #(
             osd_rgb   <= 24'd0;
             osd_alpha <= 4'd0;
         end else if (s2_text && rom_bit) begin
-            osd_on    <= 1'b1;
+            // 菜单文字跟着 mfade 淡；字幕/告警恒为 8（不参与淡入淡出）
+            osd_on    <= s2_tmenu ? (mfade != 4'd0) : 1'b1;
             osd_rgb   <= s2_tcolor;
-            osd_alpha <= 4'd8;
+            osd_alpha <= s2_tmenu ? mfade : 4'd8;
         end else begin
             osd_on    <= (s2_base_alpha != 4'd0);
             osd_rgb   <= s2_base_rgb;
