@@ -425,6 +425,12 @@ module fat_scan #(
 
     reg [3:0]  st;
     assign dbg_st = st;
+
+    // 扇区级超时 + 重试。原来 S_WT 等 rd_busy、S_RCV 等 256 个字都没有退路：
+    // 只要有一次请求没被受理、或者 SPI 丢了字节，就会永远停在这里，
+    // 上层只能等 7 秒看门狗（上板现象：进度 0→99 反复重来、一次切图要 30 秒）。
+    reg [15:0] wto;             // 等待计数（2.6ms @25MHz）
+    reg [1:0]  retry;           // 本扇区重试次数
     reg        bsy;
     reg [9:0]  bcnt;
     reg        pend_v;
@@ -719,6 +725,7 @@ module sd_bmp_reader (
     input  wire        stop,           // 解码器已收够
     output reg         busy,
     output reg         done,
+    output reg         err,            // 1 = 本次加载有扇区读失败（重试用尽）
 
     // ---- 字节流输出 ----
     output reg  [7:0]  byte_data,
@@ -738,6 +745,12 @@ module sd_bmp_reader (
 
     reg [3:0]  st;
     assign dbg_st = st;
+
+    // 扇区级超时 + 重试。原来 S_WT 等 rd_busy、S_RCV 等 256 个字都没有退路：
+    // 只要有一次请求没被受理、或者 SPI 丢了字节，就会永远停在这里，
+    // 上层只能等 7 秒看门狗（上板现象：进度 0→99 反复重来、一次切图要 30 秒）。
+    reg [15:0] wto;             // 等待计数（2.6ms @25MHz）
+    reg [1:0]  retry;           // 本扇区重试次数
     reg        bsy;
     reg [8:0]  word_cnt;
     reg [9:0]  bcnt;
@@ -790,6 +803,9 @@ module sd_bmp_reader (
             rd_start_en <= 1'b0;
             rd_sec_addr <= 32'd0;
             bsy         <= 1'b0;
+            err         <= 1'b0;
+            wto         <= 16'd0;
+            retry       <= 2'd0;
             word_cnt    <= 9'd0;
             bcnt        <= 10'd0;
             pend_v      <= 1'b0;
@@ -838,6 +854,9 @@ module sd_bmp_reader (
                         tbl_rec <= (ix_s2 < 8'd56) ? ix_s2[5:0] : 6'd0;
                         tbl_req <= 1'b1;
                         busy    <= 1'b1;
+                        err     <= 1'b0;        // 每次新加载清错误标志
+                        retry   <= 2'd0;
+                        wto     <= 16'd0;
                         st      <= S_TBL;
                     end
                 end
@@ -869,6 +888,7 @@ module sd_bmp_reader (
                         rd_sec_addr <= data_lba + ((cur_clus - 32'd2) << spc_log2) + {24'd0, sec_in};
                         rd_start_en <= 1'b1;
                         data_sector <= 1'b1;
+                        wto         <= 16'd0;
                         st          <= S_WT;
                     end
                 end
@@ -877,16 +897,71 @@ module sd_bmp_reader (
                     if (rd_busy) begin
                         rd_start_en <= 1'b0;
                         bsy         <= 1'b1;
+                        wto         <= 16'd0;
                         st          <= S_RCV;
+                    end else begin
+                        // 请求发出去 2.6ms 还没看到 busy：撤掉重发
+                        wto <= wto + 16'd1;
+                        if (wto == 16'hFFFF) begin
+                            rd_start_en <= 1'b0;
+                            if (retry == 2'd3) begin
+                                // 连续 4 次都没受理：放弃本次加载
+                                retry <= 2'd0;
+                                err   <= 1'b1;
+                                busy  <= 1'b0;
+                                done  <= 1'b1;
+                                st    <= S_IDLE;
+                            end else begin
+                                retry <= retry + 2'd1;
+                                st    <= S_CMD;
+                            end
+                        end
                     end
                 end
 
                 S_RCV: begin
                     if (rd_val_en) begin
+                        wto <= 16'd0;                  // 有数据就重置超时
                         word_cnt <= word_cnt + 9'd1;
                         if (word_cnt == 9'd255) begin
-                            bsy <= 1'b0;
-                            st  <= S_GAP;
+                            bsy   <= 1'b0;
+                            retry <= 2'd0;             // 这一扇区成功，清重试计数
+                            st    <= S_GAP;
+                        end
+                    end else if (!rd_busy && (word_cnt != 9'd0)) begin
+                        // ★ busy 落下了却没收满 256 个字：**字节流已经错位**。
+                        //   已经吐出去的字节收不回来，重读这一扇区只会让后面的像素
+                        //   整体偏移（仿真实测：半截传输后重试，图片多出 200 字节、
+                        //   223638 个像素错位）。所以这里不重试，直接判整张失败，
+                        //   由上层保留上一张继续显示。
+                        retry <= 2'd0;
+                        err   <= 1'b1;
+                        bsy   <= 1'b0;
+                        busy  <= 1'b0;
+                        done  <= 1'b1;
+                        st    <= S_IDLE;
+                    end else if (!rd_busy) begin
+                        // 一个字节都没收到就结束了：安全，可以重发请求
+                        if (retry == 2'd3) begin
+                            retry <= 2'd0;
+                            err   <= 1'b1;
+                            busy  <= 1'b0;
+                            done  <= 1'b1;
+                            st    <= S_IDLE;
+                        end else begin
+                            retry <= retry + 2'd1;
+                            st    <= S_CMD;
+                        end
+                    end else begin
+                        // 收到一半卡住了：可能已经错位，直接判失败
+                        wto <= wto + 16'd1;
+                        if (wto == 16'hFFFF) begin
+                            retry <= 2'd0;
+                            err   <= 1'b1;
+                            bsy   <= 1'b0;
+                            busy  <= 1'b0;
+                            done  <= 1'b1;
+                            st    <= S_IDLE;
                         end
                     end
                 end

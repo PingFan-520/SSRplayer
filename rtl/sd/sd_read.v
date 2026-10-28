@@ -31,6 +31,7 @@ reg    [8:0]   rx_data_cnt   ;            //接收的数据个数计数器
 reg            rx_finish_en  ;            //接收完成使能信号
                              
 reg    [3:0]   rd_ctrl_cnt   ;            //读控制计数器
+reg    [15:0]  to_cnt        ;            //阶段超时（2.6ms @25MHz）
 reg    [47:0]  cmd_rd        ;            //读命令
 reg    [5:0]   cmd_bit_cnt   ;            //读命令位计数器
 reg            rd_data_flag  ;            //准备读取数据的标志
@@ -149,6 +150,7 @@ always @(posedge clk_ref or negedge rst_n) begin
         sd_cs <= 1'b1;
         sd_mosi <= 1'b1;        
         rd_ctrl_cnt <= 4'd0;
+        to_cnt <= 16'd0;
         cmd_rd <= 48'd0;
         cmd_bit_cnt <= 6'd0;
         rd_busy <= 1'b0;
@@ -163,6 +165,7 @@ always @(posedge clk_ref or negedge rst_n) begin
                 if(pos_rd_en) begin
                     cmd_rd <= {8'h51,rd_sec_addr,8'hff};    //写入单个命令块CMD17
                     rd_ctrl_cnt <= rd_ctrl_cnt + 4'd1;      //控制计数器加1
+                    to_cnt <= 16'd0;
                     //开始执行读取数据,拉高读忙信号
                     rd_busy <= 1'b1;                      
                 end    
@@ -183,8 +186,16 @@ always @(posedge clk_ref or negedge rst_n) begin
             end    
             4'd2 : begin
                 //拉高rd_data_flag信号,准备接收数据
-                rd_data_flag <= 1'b1;                       
-                if(rx_finish_en) begin                      //数据接收完成
+                rd_data_flag <= 1'b1;
+                // ★ 收数超时：512 字节正常 164us 就收完，这里给 2.6ms。
+                //   丢字节（接触不良/时钟毛刺）时收不满 512，原来会永远等。
+                to_cnt <= to_cnt + 16'd1;
+                if (to_cnt == 16'hFFFF) begin
+                    rd_ctrl_cnt <= 4'd15;
+                    rd_data_flag <= 1'b0;
+                    sd_cs <= 1'b1;
+                end
+                else if(rx_finish_en) begin                 //数据接收完成
                     rd_ctrl_cnt <= rd_ctrl_cnt + 4'd1; 
                     rd_data_flag <= 1'b0;
                     sd_cs <= 1'b1;

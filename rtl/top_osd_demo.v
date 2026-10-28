@@ -152,12 +152,22 @@ module top_osd_demo #(
         .cfg_trans(cfg_trans), .cfg_bright(cfg_bright), .cfg_contrast(cfg_contrast),
         .cfg_scale(cfg_scale), .cfg_mus(cfg_mus), .cfg_vol(cfg_vol),
         .cfg_auto(cfg_auto),
-        .nav_next(nav_next), .nav_prev(nav_prev),
+        .nav_next(), .nav_prev(),     // 改由本文件直接产生，见下面
         .cfg_meter(cfg_meter),
         .cfg_sub(cfg_sub),
         .cfg_hold(cfg_hold), .cfg_style(cfg_style),
         .mus_total(mus_total), .mus_name(mus_name), .alert(media_alert)
     );
+
+    // ------------------------------------------------------------------
+    // 图片切换：只响应"按下那一下"，**不用长按连发**
+    //   菜单里的上下移动需要连发（快速翻列表），但换图不能：
+    //   key_ctrl 的 rep 是 100ms 一次，长按 1 秒会连发 10 次，
+    //   每一次都会把刚启动的加载打断、进度归零，
+    //   上板表现就是"进度 0→99 反复重来、一次切图要几十秒"。
+    // ------------------------------------------------------------------
+    assign nav_next = ~menu_open & k_press[2];   // KEY2：下一张
+    assign nav_prev = ~menu_open & k_press[1];   // KEY1：上一张
 
     // ------------------------------------------------------------------
     // 参数影子寄存器：按键随时可改，帧首才生效

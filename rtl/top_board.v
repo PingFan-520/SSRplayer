@@ -478,6 +478,15 @@ module top_board #(
     wire       sd_byte_vld;
     wire       rdr_busy;
 
+    // 读失败标志跨到像素域（电平，打两拍）
+    wire       rdr_err;            // 读失败（扇区重试用尽）
+    reg        err_s1, err_s2;
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin err_s1 <= 1'b0; err_s2 <= 1'b0; end
+        else        begin err_s1 <= rdr_err; err_s2 <= err_s1; end
+    end
+    wire rdr_err_p = err_s2;
+
     reg  [7:0] img_idx;
     reg        rd_en;              // pix 域电平请求（reader 用 done 应答）
     wire       rdr_done;
@@ -509,6 +518,7 @@ module top_board #(
         .stop         (bmp_eof),
         .busy         (rdr_busy),
         .done         (rdr_done),
+        .err          (rdr_err),
 
         .byte_data    (sd_byte),
         .byte_valid   (sd_byte_vld)
@@ -682,7 +692,11 @@ module top_board #(
     end
     wire boot_tmo = boot_cnt[25];        // 约 0.9s @37.5MHz
 
-    wire media_alert = (scan_done_p && (img_total_p == 8'd0)) || (~sd_ready && boot_tmo);
+    // 提示"没有可用图片"：扫到 0 张、扫描/挂载报错、或卡一直没就绪，
+    // 都别只留一块黑屏（上板排查时最难判断的就是"到底卡在哪"）
+    wire media_alert = (scan_done_p && (img_total_p == 8'd0)) ||
+                       (scan_err != 8'd0) || (mnt_err != 8'd0) ||
+                       (~sd_ready && boot_tmo);
     wire rdr_done_p = done_s2;
 
     // 当前这一行是不是"图片行"（帧内行号 25..744，图片已铺满活动区）。
@@ -817,8 +831,16 @@ module top_board #(
                     // 而不是永远卡在 LOAD（黑屏）。
                     if (!rdr_done_p) ld_wdog <= ld_wdog + 28'd1;
 
-                    if ((rdr_done_p && wr_idle_p && !in_img_row) ||
-                        (ld_wdog == 28'hFFFFFFF)) begin
+                    // 读失败（扇区重试用尽）：别再白等看门狗，立刻放弃这次换图，
+                    // 保持上一张继续显示 —— 宁可这一下不换，也不要黑屏/花屏 +
+                    // 卡 3 秒。上电首张失败就回 WAIT 重新来。
+                    if (rdr_err_p && rdr_done_p) begin
+                        rd_en     <= 1'b0;
+                        ld_wdog   <= 28'd0;
+                        fin_dly   <= 13'd0;
+                        ld_st     <= first_img ? LD_WAIT : LD_SHOW;
+                    end else if ((rdr_done_p && wr_idle_p && !in_img_row) ||
+                        (ld_wdog == 28'h7FFFFF0)) begin
                         if (fin_dly == 13'd64) begin
                             rd_en     <= 1'b0;   // 撤请求，让 reader 清 done
                             ld_wdog   <= 28'd0;

@@ -49,7 +49,26 @@ module tb_fat_chain;
     reg [8:0] scnt;
     reg       phase;
     reg       getaddr;
+    reg       half = 1'b0;
     reg [4:0] tail;               // 512 字节后 busy 的尾巴（真实控制器 ~10 拍）
+
+    // ---- 故障注入（用 +FAULT=n 指定"第 n 次传输不给 busy"，-1 = 不注入）----
+    //   FAULT=n      ：第 n 次传输完全不响应（模拟卡丢 CMD17 响应）
+    //   HALF=n       ：第 n 次传输只发 100 个字（模拟 SPI 丢字节）
+    //   FAULT_ALL=1  ：所有传输都不响应（模拟卡彻底掉线）
+    integer fault_at  = -1;
+    integer half_at   = -1;
+    integer fault_all = 0;
+    integer n_xfer    = 0;
+    integer hit       = 0;
+    initial begin
+        hit = $value$plusargs("FAULT=%d", fault_at);
+        hit = $value$plusargs("HALF=%d",  half_at);
+        hit = $value$plusargs("FAULT_ALL=%d", fault_all);
+        if (fault_at >= 0)  $display("[inj] 第 %0d 次传输不响应", fault_at);
+        if (half_at  >= 0)  $display("[inj] 第 %0d 次传输只发 100 字", half_at);
+        if (fault_all != 0) $display("[inj] 全部传输不响应");
+    end
 
     initial begin
         sfd = $fopen("fat_card.img", "rb");
@@ -67,11 +86,19 @@ module tb_fat_chain;
     always @(posedge clk_sd) begin
         s_val <= 1'b0;
         if (!rst && s_start && !s_busy) begin
-            s_busy  <= 1'b1;
-            scnt    <= 9'd0;
-            phase   <= 1'b0;
-            getaddr <= 1'b1;          // sd_read 是 start 之后第 2 拍才锁地址
-            tail    <= 5'd0;
+            n_xfer <= n_xfer + 1;
+            // ★ 故障注入：命中就不拉 busy（请求被"卡丢"），
+            //   验证 reader 的 2.6ms 超时重试能不能自己恢复
+            if ((fault_all != 0) || (n_xfer == fault_at)) begin
+                $display("[inj] t=%0t 第 %0d 次传输被丢弃（sec=%0d）", $time, n_xfer, s_sec);
+            end else begin
+                s_busy  <= 1'b1;
+                scnt    <= 9'd0;
+                phase   <= 1'b0;
+                getaddr <= 1'b1;      // sd_read 是 start 之后第 2 拍才锁地址
+                tail    <= 5'd0;
+                half    <= (n_xfer == half_at);
+            end
         end else if (s_busy) begin
             if (getaddr) begin
                 addr    <= s_sec * 512;
@@ -85,8 +112,9 @@ module tb_fat_chain;
                 s_data <= {card[addr + scnt*2], card[addr + scnt*2 + 1]};
                 s_val  <= 1'b1;
                 phase  <= 1'b0;
-                if (scnt == 9'd255) tail <= 5'd12;
-                else                scnt <= scnt + 9'd1;
+                if (half && (scnt == 9'd99)) tail <= 5'd12;   // 只发 100 个字就收尾
+                else if (scnt == 9'd255)     tail <= 5'd12;
+                else                         scnt <= scnt + 9'd1;
             end
         end
     end
