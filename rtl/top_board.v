@@ -1068,13 +1068,51 @@ module top_board #(
         end
     end
 
-    // 数码管（左->右）：图片数 | {ld_st,sd_ready} | mnt_st | scan_st | 0 0
-    //   正常:  3 9 0 8 0 0   （3 张图 / SHOW / 挂载完 / 扫描完）
-    //   卡在挂载: 0 1 1 3 0 0 （S_M0 / S_RCV）
-    //   扫描错:  F 3 ...    挂载错: E 1 ...
-    wire [23:0] dbg_ext = (scan_err != 8'd0) ? {fb_rd_drop, 4'hF, scan_err, 8'h00}
-                        : (mnt_err  != 8'd0) ? {fb_rd_drop, 4'hE, mnt_err, 8'h00}
-                        : { fb_rd_drop, img_total_p[3:0], ld_st, sd_ready,
+    // ------------------------------------------------------------------
+    // 数码管（6 位，左->右）：
+    //   读图进度/丢字 | 图片数 | {ld_st,sd_ready} | 挂载状态 | 扫描状态
+    //   静止正常: 0 0 3 9 0 8
+    //   读图中  : 4 7 3 7 0 8  （47% / 3 张 / LOAD）
+    //   扫描错  : .. F 3 ..     挂载错: .. E 1 ..
+    //
+    // ★ 进度只用 9 个寄存器：拿**已有的**加载看门狗 ld_wdog 当计时源，
+    //   取 ld_wdog[19] 的上升沿（2^19 / 37.5MHz ≈ 14ms）让两位 BCD 加 1，
+    //   1.4s 正好走满 100%。上一版用 13 位像素计数器 + 比较（21 个寄存器 +
+    //   一堆进位链），把布局推到临界、phy_1 单点布线冲突布不通，已废弃。
+    //   读图速率是恒定的（25MHz SPI），所以按时间走和按像素走差别 <10%。
+    // ------------------------------------------------------------------
+    reg        wd19_d;
+    reg  [3:0] prog_t, prog_u;               // 十位 / 个位（BCD）
+    wire       prog_tick = ld_wdog[19] & ~wd19_d;
+
+    always @(posedge clk_pix or negedge rst_n) begin
+        if (!rst_n) begin
+            wd19_d <= 1'b0;
+            prog_t <= 4'd0;
+            prog_u <= 4'd0;
+        end else begin
+            wd19_d <= ld_wdog[19];
+            if (ld_st == LD_CLEAR) begin          // 每次换图从 00 起
+                prog_t <= 4'd0;
+                prog_u <= 4'd0;
+            end else if (prog_tick && (ld_st == LD_LOAD)) begin
+                if (prog_u == 4'd9) begin
+                    prog_u <= 4'd0;
+                    if (prog_t != 4'd9) prog_t <= prog_t + 4'd1;   // 封顶 99
+                end else begin
+                    prog_u <= prog_u + 4'd1;
+                end
+            end
+        end
+    end
+
+    wire        ld_busy = (ld_st == LD_CLEAR) || (ld_st == LD_ARM) ||
+                          (ld_st == LD_LOAD);
+    wire [7:0]  dbg_head = ld_busy ? {prog_t, prog_u} : fb_rd_drop;
+
+    wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
+                        : (mnt_err  != 8'd0) ? {dbg_head, 4'hE, mnt_err, 8'h00}
+                        : { dbg_head, img_total_p[3:0], ld_st, sd_ready,
                             1'b0, mnt_st, scan_st };
 
     wire        menu_open;
