@@ -31,7 +31,7 @@ reg    [8:0]   rx_data_cnt   ;            //接收的数据个数计数器
 reg            rx_finish_en  ;            //接收完成使能信号
                              
 reg    [3:0]   rd_ctrl_cnt   ;            //读控制计数器
-reg    [19:0]  to_cnt        ;            //阶段超时（21ms @25MHz，故意放宽）
+reg    [16:0]  to_cnt        ;            //阶段超时（5.2ms @25MHz，正常 <1ms）
 reg    [47:0]  cmd_rd        ;            //读命令
 reg    [5:0]   cmd_bit_cnt   ;            //读命令位计数器
 reg            rd_data_flag  ;            //准备读取数据的标志
@@ -160,7 +160,7 @@ always @(posedge clk_ref or negedge rst_n) begin
         sd_cs <= 1'b1;
         sd_mosi <= 1'b1;        
         rd_ctrl_cnt <= 4'd0;
-        to_cnt <= 20'd0;
+        to_cnt <= 17'd0;
         cmd_rd <= 48'd0;
         cmd_bit_cnt <= 6'd0;
         rd_busy <= 1'b0;
@@ -177,7 +177,7 @@ always @(posedge clk_ref or negedge rst_n) begin
                 if(pos_rd_en) begin
                     cmd_rd <= {8'h51,rd_sec_addr,8'hff};    //写入单个命令块CMD17
                     rd_ctrl_cnt <= rd_ctrl_cnt + 4'd1;      //控制计数器加1
-                    to_cnt <= 20'd0;
+                    to_cnt <= 17'd0;
                     cmd_bit_cnt <= 6'd0;                    //★ 命令位计数器必须归零
                     rx_abort <= 1'b1;                       //★ 清接收器残余状态
                     //开始执行读取数据,拉高读忙信号
@@ -195,14 +195,14 @@ always @(posedge clk_ref or negedge rst_n) begin
                     if(res_en) begin                        //SD卡响应
                         rd_ctrl_cnt <= rd_ctrl_cnt + 4'd1;  //控制计数器加1 
                         cmd_bit_cnt <= 6'd0;
-                        to_cnt <= 20'd0;
+                        to_cnt <= 17'd0;
                     end
                     else begin
                         // ★ 等响应也要有超时：卡没应答（接触不良/命令被打断）时
                         //   原来会永远停在这里，rd_busy 一直高，整条 SD 总线死锁，
                         //   上层只能一轮一轮等看门狗 —— 上板就是"0→99 反复、几十秒"。
-                        to_cnt <= to_cnt + 20'd1;
-                        if (to_cnt == 20'h7FFFF) begin
+                        to_cnt <= to_cnt + 17'd1;
+                        if (to_cnt == 17'h1FFFF) begin
                             rd_ctrl_cnt <= 4'd15;
                             cmd_bit_cnt <= 6'd0;
                             sd_cs       <= 1'b1;
@@ -215,8 +215,8 @@ always @(posedge clk_ref or negedge rst_n) begin
                 rd_data_flag <= 1'b1;
                 // ★ 收数超时：512 字节正常 164us 就收完，这里给 2.6ms。
                 //   丢字节（接触不良/时钟毛刺）时收不满 512，原来会永远等。
-                to_cnt <= to_cnt + 20'd1;
-                if (to_cnt == 20'h7FFFF) begin
+                to_cnt <= to_cnt + 17'd1;
+                if (to_cnt == 17'h1FFFF) begin
                     rd_ctrl_cnt <= 4'd15;
                     rd_data_flag <= 1'b0;
                     rx_abort <= 1'b1;

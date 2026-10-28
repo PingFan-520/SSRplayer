@@ -683,7 +683,7 @@ module top_board #(
     //   reinit_pulse 交给下面 boot_tmr 那一段去拉 sd_reinit。
     reg        ld_retry;
     reg        reinit_pulse;
-    reg [19:0] wait_hold;       // 自愈重试后 LD_WAIT 的静默期（等 SD 段重挂载）
+    reg [7:0]  wait_hold;       // 自愈重试后 LD_WAIT 的静默期（约 6.8us，只为跳过指示信号的 2~3 拍滞后）
 
     // 每张图加载完后记下"它有没有铺满整块"。下一张换图时，如果上一张是满屏，
     // 说明旧图的每个像素都会被新图覆盖 —— 不用清屏，省掉 0.65s 的全屏写黑。
@@ -818,7 +818,7 @@ module top_board #(
             load_cnt  <= 4'd0;
             ld_retry  <= 1'b0;
             reinit_pulse <= 1'b0;
-            wait_hold <= 20'd0;
+            wait_hold <= 8'd0;
             load_mode <= 1'b1;          // 只有首次为 1：此时读停、整帧写 A
             rd_bank   <= 1'b0;
             wr_bank   <= 1'b0;
@@ -840,9 +840,9 @@ module top_board #(
                     // ★ 复位 SD 段之后不能马上信 sd_ready/scan_done：
                     //   这两个信号要 2~3 拍才会落下来，自愈重试时如果立刻放行，
                     //   会拿着"还没挂载"的 fat_lba/data_lba 去读图，必错。
-                    //   所以给一段 28ms 的静默期，之后还要等 sd_ready 重新起来。
-                    if (wait_hold != 20'd0) begin
-                        wait_hold <= wait_hold - 20'd1;
+                    //   所以给一小段静默期（6.8us），之后还要等 sd_ready 重新起来。
+                    if (wait_hold != 8'd0) begin
+                        wait_hold <= wait_hold - 8'd1;
                     end else if (sd_ready && scan_done_p && (img_total_p != 8'd0)) begin
                         sc_clr   <= 1'b1;     // 先清屏，再开始读图
                         clr_ok   <= 1'b0;
@@ -914,14 +914,14 @@ module top_board #(
                     if (((rdr_err_p && rdr_done_p) || ld_tmo) && !ld_retry) begin
                         ld_retry     <= 1'b1;
                         reinit_pulse <= 1'b1;
-                        wait_hold    <= 20'hFFFFF;   // 28ms 静默期，等 SD 段复位+重挂载
+                        wait_hold    <= 8'hFF;       // 6.8us 静默期，跳过指示信号滞后
                         rd_en        <= 1'b0;
                         fin_dly      <= 13'd0;
                         ld_st        <= LD_WAIT;
                     end else if (rdr_err_p && rdr_done_p) begin
                         rd_en     <= 1'b0;
                         fin_dly   <= 13'd0;
-                        wait_hold <= 20'hFFFFF;
+                        wait_hold <= 8'hFF;
                         ld_st     <= first_img ? LD_WAIT : LD_SHOW;
                     end else if ((rdr_done_p && wr_idle_p && !in_img_row) ||
                         ld_tmo) begin
