@@ -75,6 +75,8 @@ module tb_menu_fade;
 
     task press_menu;  begin k_menu <= 1'b1; @(posedge clk); k_menu <= 1'b0; end endtask
     task press_ok;    begin k_ok   <= 1'b1; @(posedge clk); k_ok   <= 1'b0; end endtask
+    task press_down;  begin k_down <= 1'b1; @(posedge clk); k_down <= 1'b0; end endtask
+    task press_up;    begin k_up   <= 1'b1; @(posedge clk); k_up   <= 1'b0; end endtask
 
     initial begin
         repeat (5) @(posedge clk);
@@ -104,6 +106,35 @@ module tb_menu_fade;
         end
         if (osd_alpha !== 4'd8) begin
             $display("  [FAIL] 淡入没到 8（%0d）", osd_alpha);
+            n_bad = n_bad + 1;
+        end
+
+        // ---------------- 2.5) 上下键：高亮条必须跟着动 ----------------
+        $display("[2.5] KEY2 下移：r_item 应逐帧跟随（高亮条不动那个 bug 的回归点）");
+        press_down;
+        repeat (3) frame;
+        $display("   item=%0d r_item=%0d mfade=%0d", dut.item, dut.r_item, dut.mfade);
+        if (dut.r_item !== 3'd1) begin
+            $display("  [FAIL] 下键后高亮行没跟着动（r_item=%0d，应为 1）", dut.r_item);
+            n_bad = n_bad + 1;
+        end
+        press_down;
+        repeat (3) frame;
+        if (dut.r_item !== 3'd2) begin
+            $display("  [FAIL] 第二次下键高亮行没动（r_item=%0d，应为 2）", dut.r_item);
+            n_bad = n_bad + 1;
+        end
+        press_up;
+        repeat (3) frame;
+        if (dut.r_item !== 3'd1) begin
+            $display("  [FAIL] 上键后高亮行没回（r_item=%0d，应为 1）", dut.r_item);
+            n_bad = n_bad + 1;
+        end
+        // 回到第 0 项（IMG），后面要进子菜单
+        press_up;
+        repeat (3) frame;
+        if (dut.r_item !== 3'd0) begin
+            $display("  [FAIL] 没回到第 0 项（r_item=%0d）", dut.r_item);
             n_bad = n_bad + 1;
         end
 

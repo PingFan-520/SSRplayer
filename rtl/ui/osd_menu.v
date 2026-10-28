@@ -258,10 +258,14 @@ module osd_menu #(
             r_item <= 3'd0;
         end else if (frame_start) begin
             r_open <= open;
-            // 淡到全透明才换页/换行：换页瞬间看不见，不会"半透明时内容突然换掉"；
-            // 正常显示时 mfade 恒为 8，所以光标移动仍然逐帧跟手。
+            // 页面：只在全透明时更新 —— 换页要先淡出，换完再淡入。
+            // 光标：稳态(mfade==8)也要更新，否则菜单一打开高亮条就再也不动
+            //       （上一版只判 mfade==0，正好把稳态漏掉了）。
+            //       换页待处理时冻结，让淡出过程中的还是旧页的旧高亮。
             if (mfade == 4'd0) begin
                 r_page <= page;
+                r_item <= item;
+            end else if ((mfade == 4'd8) && !page_chg) begin
                 r_item <= item;
             end
         end

@@ -667,9 +667,6 @@ module top_board #(
     //   超时收不干净 -> 32 位没饱和 -> 7.16s 回绕一次 -> "ld_wdog==0" 把进度清零，
     //   于是数码管 0→99 反复、一次切图几十秒。现在计时只做一件事：饱和计数。
     reg [27:0] sw_tmr;
-    reg [2:0]  ld_st_d;
-    reg [3:0]  dur_q;           // 上一次切图耗时（0.447s 一格，F = 6.7s 以上）
-    reg [3:0]  sw_cnt;          // 上电以来一共切了几次图（诊断"是否真在反复切"）
 
     // 诊断：本次切图一共进了几次 LD_LOAD。
     //   每次按键/自动切图清零，在静止态显示在数码管最左一位。
@@ -771,24 +768,6 @@ module top_board #(
         else if (ld_run && (sw_tmr != 28'hFFFFFFF)) sw_tmr <= sw_tmr + 28'd1;
     end
 
-    // 切图次数：用户按一次"下一张"，这里必须只 +1。
-    // 如果看到它一次跳 3~4，说明 nav_step 真的在连发（而不是读图反复）。
-    always @(posedge clk_pix or negedge rst_n) begin
-        if (!rst_n)                                     sw_cnt <= 4'd0;
-        else if (ld_start && (sw_cnt != 4'hF))          sw_cnt <= sw_cnt + 4'd1;
-    end
-
-    // 回到"正常显示"那一拍，把这次切图的总耗时抓下来（0.447s 一格）
-    always @(posedge clk_pix or negedge rst_n) begin
-        if (!rst_n) ld_st_d <= LD_WAIT;
-        else        ld_st_d <= ld_st;
-    end
-    wire show_enter = (ld_st == LD_SHOW) && (ld_st_d != LD_SHOW);
-
-    always @(posedge clk_pix or negedge rst_n) begin
-        if (!rst_n)          dur_q <= 4'd0;
-        else if (show_enter) dur_q <= (sw_tmr >= 28'hF000000) ? 4'hF : sw_tmr[27:24];
-    end
 
     always @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -1256,10 +1235,11 @@ module top_board #(
     wire [7:0]  dbg_head = ld_busy ? {prog_t, prog_u}
                                    : {load_cnt, rdr_err_st};
 
+    // 6 位：左两位 = 读图进度（加载中）/ 加载次数+出错状态（静止）
+    //       中间两位 = 图片数（十六进制）   右边两位 = 音乐数（十六进制）
     wire [23:0] dbg_ext = (scan_err != 8'd0) ? {dbg_head, 4'hF, scan_err, 8'h00}
                         : (mnt_err  != 8'd0) ? {dbg_head, 4'hE, mnt_err, 8'h00}
-                        : { dbg_head, img_total_p[3:0], ld_st, sd_ready,
-                            sw_cnt, dur_q };
+                        : { dbg_head, img_total_p[7:0], 4'd0, mus_total_p };
 
     wire        menu_open;
     wire [2:0]  dbg_item;
