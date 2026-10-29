@@ -390,13 +390,12 @@ module frame_buffer #(
     //   丢掉 N 个字 -> 之后所有像素提前 N 个字 -> 整幅图纵向错 N/480 行，
     //   而且每帧丢的个数不同 -> 上板看到的"整幅画面上下轻微跳动/错行"。
     //   1024 字 ≈ 73us 的消耗量，读写带宽差 5 倍以上，留这么多完全够。
-    // 50Hz 后每帧要取 540x480 字 / 20ms ≈ 13M 字/s（原 30Hz 是 7.8M），
-    // 所以：① 预灌门限 1024 -> 1536（FIFO 有 2048）；② 读突发不再只认
-    // wq==63 这一个时隙（1/64 拍），改成 wq[5]（1/2 拍）——写突发仍按
-    // rq==63 的时隙走，两者靠 ~bsend / ~app_busy 互斥，读侧优先。
+    // 30Hz 下每帧取 540x480 字 / 33ms ≈ 7.8M 字/s，这一组参数是上板验证过的：
+    //   预灌门限 1024（FIFO 2048，留一半余量吸收写突发）；
+    //   读突发只在 wq==63 这一个时隙发起（1/64 拍），与写突发（rq==63）互斥。
     wire rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                  (rf_used_r < 12'd1536) & ~rf_full & ~rburst & (rgap == 4'd0) &
-                  ~bsend & wq[5];
+                  (rf_used_r < 12'd1024) & ~rf_full & ~rburst & (rgap == 4'd0) &
+                  ~bsend & (wq == 6'd63);
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin
