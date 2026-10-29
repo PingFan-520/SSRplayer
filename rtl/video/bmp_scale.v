@@ -132,16 +132,40 @@ module bmp_scale #(
     // 上层用它决定"换图时还要不要清屏"——满屏图直接覆盖旧图，不用清。
     assign o_full = (ws >= DWP) && (hs >= DHP);
 
-    // 采样掩码：低 k 位为 0 才输出（k=4 时 1<<4 在 4 位里回绕成 0，0-1=15，正确）
     wire [3:0] kmask_x = (kx == 3'd0) ? 4'd0 : ((4'd1 << kx) - 4'd1);
     wire [3:0] kmask_y = (ky == 3'd0) ? 4'd0 : ((4'd1 << ky) - 4'd1);
 
-    wire sel_col = use34 ? (s_sx[1:0] != 2'd3) : ((s_sx[3:0] & kmask_x) == 4'd0);
-    wire sel_row = use34 ? (s_sy[1:0] != 2'd3) : ((s_sy[3:0] & kmask_y) == 4'd0);
+
+    // ------------------------------------------------------------------
+    // ★ 静态量打一拍：ws/hs/ox/oy/掩码只跟 img_w/img_h/mode/kx/ky 有关，
+    //   换图才变。它们参与"移位 → 减法 → 坐标加法 → 比较 → 输出"这条长链，
+    //   在 75MHz（13.33ns）下是 -3.2ns 的瓶颈。打一拍后链被切成两段，
+    //   代价只是换图后第一个像素用旧偏移（紧接着就有整屏清屏覆盖，看不见）。
+    // ------------------------------------------------------------------
+    reg signed [12:0] ox_r, oy_r;
+    reg        [3:0]  kmx_r, kmy_r;
+    reg               use34_r;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ox_r <= 13'sd0; oy_r <= 13'sd0;
+            kmx_r <= 4'd0;  kmy_r <= 4'd0;
+            use34_r <= 1'b0;
+        end else begin
+            ox_r    <= ox_s;
+            oy_r    <= oy_s;
+            kmx_r   <= kmask_x;
+            kmy_r   <= kmask_y;
+            use34_r <= use34;
+        end
+    end
+
+    // 采样掩码：低 k 位为 0 才输出（k=4 时 1<<4 在 4 位里回绕成 0，0-1=15，正确）
+    wire sel_col = use34_r ? (s_sx[1:0] != 2'd3) : ((s_sx[3:0] & kmx_r) == 4'd0);
+    wire sel_row = use34_r ? (s_sy[1:0] != 2'd3) : ((s_sy[3:0] & kmy_r) == 4'd0);
 
     // 目标坐标（有符号）+ 越界裁切
-    wire signed [12:0] tx_s = $signed({1'b0, (s_sx >> kx)}) + ox_s;
-    wire signed [12:0] ty_s = $signed({1'b0, (s_sy >> ky)}) + oy_s;
+    wire signed [12:0] tx_s = $signed({1'b0, (s_sx >> kx)}) + ox_r;
+    wire signed [12:0] ty_s = $signed({1'b0, (s_sy >> ky)}) + oy_r;
 
     wire in_x = use34 ? 1'b1 : ((tx_s >= 13'sd0) && (tx_s < $signed({1'b0, DWP})));
     wire in_y = use34 ? 1'b1 : ((ty_s >= 13'sd0) && (ty_s < $signed({1'b0, DHP})));

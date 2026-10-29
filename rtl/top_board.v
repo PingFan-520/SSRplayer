@@ -27,16 +27,20 @@
 `timescale 1ns / 1ps
 
 module top_board #(
+    // 1280x720@50Hz（CTA-861 VIC 19），像素时钟 50MHz。
+    //   H 消隐压到 62 像素（标准 720p50 是 700），换来"50MHz 就能跑 50Hz"：
+    //   行频 50M/1342 = 37.26kHz，与标准 37.5kHz 只差 0.6%，显示器按 720p50 锁得住。
+    //   纵向 5+20+3=28 行，V_OFF=25 不变（帧缓存写窗口/prefill 都依赖它）。
     parameter integer HACTIVE = 1280,
-    parameter integer HTOTAL  = 1650,
+    parameter integer HTOTAL  = 1342,
     parameter integer HSA     = 40,
-    parameter integer HBP     = 220,
-    parameter integer HFP     = 110,
+    parameter integer HBP     = 16,
+    parameter integer HFP     = 6,
     parameter integer VACTIVE = 720,
-    parameter integer VTOTAL  = 750,
+    parameter integer VTOTAL  = 748,
     parameter integer VSA     = 5,
     parameter integer VBP     = 20,
-    parameter integer VFP     = 5,
+    parameter integer VFP     = 3,
     // SD 卡上的图片布局（裸扇区，PC 端用 tools/make_sd_image.py 生成镜像）
     // 图片数量不再写死：FAT32 根目录里有多少张 BMP 就循环多少张（上限 56）
     // 音乐区（tools/make_sd_image.py 会打印这三个数）
@@ -98,12 +102,12 @@ module top_board #(
         .REFCLK_DIV     (1),
         .FBCLK_DIV      (15),
         .CLKC0_ENABLE   ("ENABLE"),
-        .CLKC0_DIV      (20),
-        .CLKC0_CPHASE   (19),
+        .CLKC0_DIV      (15),
+        .CLKC0_CPHASE   (14),
         .CLKC0_FPHASE   (0),
         .CLKC1_ENABLE   ("ENABLE"),
-        .CLKC1_DIV      (4),
-        .CLKC1_CPHASE   (3),
+        .CLKC1_DIV      (3),
+        .CLKC1_CPHASE   (2),
         .CLKC1_FPHASE   (0),
         .CLKC2_ENABLE   ("ENABLE"),
         .CLKC2_DIV      (6),
@@ -748,7 +752,7 @@ module top_board #(
     // ------------------------------------------------------------------
     wire ld_start = (ld_st == LD_SHOW) && (nav_step || (dbg_scale != scale_d));
     wire ld_run   = (ld_st != LD_SHOW) && (ld_st != LD_WAIT);
-    wire ld_tmo   = (sw_tmr >= 28'd127_500_000);          // 3.4s @37.5MHz
+    wire ld_tmo   = (sw_tmr >= 28'd170_000_000);          // 3.4s @37.5MHz
 
     // 自愈重试也要把计时/进度清零，否则第二次加载一进来就"已超时"
     wire sw_rst   = ld_start || reinit_pulse;
@@ -1239,7 +1243,7 @@ module top_board #(
         .VACTIVE(VACTIVE), .VTOTAL(VTOTAL), .VSA(VSA), .VBP(VBP), .VFP(VFP),
         .PX0(340), .PY0(30), .PW(600), .PH(660),
         .HOLD_FRAMES(75),
-        .KEY_CLK_HZ(37_500_000),
+        .KEY_CLK_HZ(50_000_000),
         .USE_EXT(1),
         .MUS_NUM(6)
     ) u_core (
@@ -1309,7 +1313,7 @@ module top_board #(
     wire [23:0] wav_l, wav_r;
     wire [7:0]  wav_lvl;
 
-    tone_gen #(.CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)) u_tone (
+    tone_gen #(.CLK_HZ(50_000_000), .SAMPLE_HZ(48_000)) u_tone (
         .clk       (clk_pix),
         .rst       (~rst_n),
         .note_idx  (img_idx),
@@ -1326,7 +1330,7 @@ module top_board #(
 
     wav_player #(
         .TRK_NUM(6),
-        .CLK_HZ(37_500_000), .SAMPLE_HZ(48_000)
+        .CLK_HZ(50_000_000), .SAMPLE_HZ(48_000)
     ) u_wav (
         .clk     (clk_pix),
         .clk_sd  (clk_sd),
@@ -1374,7 +1378,12 @@ module top_board #(
         .VFP               (VFP),
         .VBP               (VBP),
         .VACTIVE           (VACTIVE),
-        .VIDEO_VIC         (4),
+        // ★ AVI InfoFrame 里的 VIC 必须和真实时序一致。
+        //   原来的 4 = 1280x720p60，而我们实际跑 30Hz：相信 AVI 的显示器
+        //   会按 60Hz 去锁，锁不上就报"不支持"（1080p 屏实测如此，
+        //   而 2K 屏不管 AVI、只看时序，所以能显示）。
+        //   720p30 对应 CTA-861 的 VIC 62。
+        .VIDEO_VIC         (19),
         .VIDEO_TPG         ("Disable"),
         .VIDEO_FORMAT      ("RGB"),
         .AUDIO_SAMPLE_RATE ("48K"),
@@ -1396,7 +1405,7 @@ module top_board #(
         .I_audio_left_data (aud_left),
         .I_audio_right_data(aud_right),
         .I_acr_valid       (1'b1),
-        .I_acr_cts         (20'd37500),
+        .I_acr_cts         (20'd50000),
         .I_acr_n           (20'd6144),
 
         .O_video_locked    (),

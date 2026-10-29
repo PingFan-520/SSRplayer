@@ -243,13 +243,16 @@ module spectrum #(
     reg        [7:0]  disp [0:NB-1];     // 显示值（带衰减）
 
     reg  [39:0] eng;                    // 本频段能量（求和与 log 分两拍算）
+    reg  [5:0]  idx_r;                  // 最高有效位位置（压对数第一拍）
+    reg  [39:0] eng_r;                  // 与 idx_r 对齐的能量值
     localparam [2:0] S_IDLE = 3'd0,
                      S_UA   = 3'd1,      // 取系数、发乘法
                      S_UB   = 3'd2,      // 用乘法结果更新并旋转
                      S_PA   = 3'd3,      // 块结束：算 s1^2 / s2^2 / coef*s1
                      S_PC   = 3'd5,      // 块结束：算 coef*s1*s2
                      S_PB   = 3'd4,      // 块结束：求和
-                     S_PD   = 3'd6;      // 块结束：压对数、清零（与求和分开，砍时序）
+                     S_PD   = 3'd6,      // 块结束：优先级编码打一拍（原来是 40 级 for 链）
+                     S_PE   = 3'd7;      // 块结束：压对数、清零
 
     reg [2:0]  st;
     reg [4:0]  bi;                 // 当前处理的频段
@@ -326,21 +329,49 @@ module spectrum #(
 
     // ---------------- 能量 -> 8bit（对数压缩） ----------------
     // p 最大约 2^35；直接取高位做对数，让弱信号也能看见
-    function [7:0] log8;
+    // 40 位最高有效位位置（分层优先编码：组内 8 选 → 组间 5 选，约 10 级）
+    //   原来写成 for(i=0;i<40) if(p[i]) idx=i，综合出 40 级优先链，
+    //   在 clk_pix 26.67ns 预算下就吃掉 18ns；75MHz（13.33ns）下更是 -4.8ns。
+    function [5:0] prio40;
         input [39:0] p;
-        integer i, idx, v;
+        reg [2:0] g;
+        reg [2:0] b;
         begin
-            idx = 0;
-            for (i = 0; i < 40; i = i + 1)
-                if (p[i]) idx = i;
-            if (idx <= 17) begin
-                log8 = 8'd0;
-            end else begin
-                v = (idx - 17) * 11
-                  + (p[idx-1] ? 5 : 0) + (p[idx-2] ? 3 : 0) + (p[idx-3] ? 1 : 0);
-                if (v > 255) v = 255;
-                log8 = v[7:0];
-            end
+            if      (p[39:32] != 8'd0) g = 3'd4;
+            else if (p[31:24] != 8'd0) g = 3'd3;
+            else if (p[23:16] != 8'd0) g = 3'd2;
+            else if (p[15:8]  != 8'd0) g = 3'd1;
+            else                       g = 3'd0;
+            case (g)
+                3'd4: b = p[39] ? 3'd7 : p[38] ? 3'd6 : p[37] ? 3'd5 : p[36] ? 3'd4 :
+                            p[35] ? 3'd3 : p[34] ? 3'd2 : p[33] ? 3'd1 : 3'd0;
+                3'd3: b = p[31] ? 3'd7 : p[30] ? 3'd6 : p[29] ? 3'd5 : p[28] ? 3'd4 :
+                            p[27] ? 3'd3 : p[26] ? 3'd2 : p[25] ? 3'd1 : 3'd0;
+                3'd2: b = p[23] ? 3'd7 : p[22] ? 3'd6 : p[21] ? 3'd5 : p[20] ? 3'd4 :
+                            p[19] ? 3'd3 : p[18] ? 3'd2 : p[17] ? 3'd1 : 3'd0;
+                3'd1: b = p[15] ? 3'd7 : p[14] ? 3'd6 : p[13] ? 3'd5 : p[12] ? 3'd4 :
+                            p[11] ? 3'd3 : p[10] ? 3'd2 : p[9]  ? 3'd1 : 3'd0;
+                default: b = p[7] ? 3'd7 : p[6] ? 3'd6 : p[5] ? 3'd5 : p[4] ? 3'd4 :
+                               p[3] ? 3'd3 : p[2] ? 3'd2 : p[1] ? 3'd1 : 3'd0;
+            endcase
+            prio40 = {g, b};
+        end
+    endfunction
+
+    // 位置 + 尾数 → 8bit 对数刻度（idx<=17 夹到 0；原 log8 的等价实现）
+    function [7:0] fmt8;
+        input [5:0]  idx;
+        input [39:0] p;
+        reg   [39:0] sh;
+        integer v;
+        begin
+            sh = p >> ((idx > 6'd3) ? (idx - 6'd3) : 6'd0);
+            v  = (idx - 6'd17) * 11
+               + (sh[2] ? 5 : 0) + (sh[1] ? 3 : 0) + (sh[0] ? 1 : 0);
+            if (idx <= 6'd17) v = 0;
+            if (v < 0)   v = 0;
+            if (v > 255) v = 255;
+            fmt8 = v[7:0];
         end
     endfunction
 
@@ -448,7 +479,13 @@ module spectrum #(
                 end
 
                 S_PD: begin
-                    mag[bi] <= (xacc == 24'd0) ? 8'd0 : log8(eng);
+                    idx_r <= prio40(eng);
+                    eng_r <= eng;
+                    st    <= S_PE;
+                end
+
+                S_PE: begin
+                    mag[bi] <= (xacc == 24'd0) ? 8'd0 : fmt8(idx_r, eng_r);
                     for (k = 0; k < NB-1; k = k + 1) begin
                         s1[k] <= s1[k+1];
                         s2[k] <= s2[k+1];

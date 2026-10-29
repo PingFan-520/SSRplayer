@@ -313,13 +313,36 @@ module osd_menu #(
                          (ridx == 3'd5) ? {3'b000, v_meter}   :
                          (ridx == 3'd6) ? {3'b000, v_sub}     : 4'd0;
 
+    // ------------------------------------------------------------------
+    // ★ 行描述锁存：row_band / ridx / row_tv / row_fr / row_val 只跟 y 有关，
+    //   一条扫描线内恒定。原来它们串在逐像素的 "y-偏移 → 右移求行号 →
+    //   减行首 → 比行内位置 → 查字模" 这条链上（15 级），50MHz 下差 0.9ns。
+    //   改成每行在 x==0 处锁存一次，逐像素只用寄存器输出。
+    // ------------------------------------------------------------------
+    reg        row_band_l, row_tv_l;
+    reg [2:0]  ridx_l;
+    reg [3:0]  row_fr_l;
+    reg [3:0]  row_val_l;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            row_band_l <= 1'b0; row_tv_l <= 1'b0;
+            ridx_l <= 3'd0; row_fr_l <= 4'd0; row_val_l <= 4'd0;
+        end else if (x == 12'd0) begin
+            row_band_l <= row_band;
+            row_tv_l   <= row_tv;
+            ridx_l     <= ridx;
+            row_fr_l   <= row_fr;
+            row_val_l  <= row_val;
+        end
+    end
+
     wire title_hv = (x >= PX0 + 32) && (x < PX0 + 160) && (y >= py0_cur + 24) && (y < py0_cur + 56);
     wire [11:0] tcx = x - (PX0 + 32);
 
-    wire label_hv = (x >= PX0 + 32) && (x < PX0 + 160) && row_band && row_tv;
+    wire label_hv = (x >= PX0 + 32) && (x < PX0 + 160) && row_band_l && row_tv_l;
     wire [11:0] lcx = x - (PX0 + 32);
 
-    wire value_hv = (x >= PX0 + 300) && (x < PX0 + 524) && row_band && row_tv;
+    wire value_hv = (x >= PX0 + 300) && (x < PX0 + 524) && row_band_l && row_tv_l;
     wire [11:0] vcx = x - (PX0 + 300);
 
     wire hint_hv  = (x >= PX0 + 32) && (x < PX0 + 320) &&
@@ -817,7 +840,7 @@ module osd_menu #(
             end else if (in_border) begin
                 s0_base_rgb   = C_BORDER;
                 s0_base_alpha = 4'd8;
-            end else if (row_band && (ridx == r_item)) begin
+            end else if (row_band_l && (ridx_l == r_item)) begin
                 s0_base_rgb   = C_HLBG;
                 s0_base_alpha = 4'd8;
             end else begin
@@ -842,16 +865,16 @@ module osd_menu #(
         end else if (mvis && label_hv) begin
             s0_text   = 1'b1;
             s0_tmenu  = 1'b1;
-            s0_glyph  = g_label(r_page, ridx, lcx[6:5], mus_total[2:0]);
+            s0_glyph  = g_label(r_page, ridx_l, lcx[6:5], mus_total[2:0]);
             s0_fcol   = lcx[4:1];
-            s0_frow   = row_fr;
+            s0_frow   = row_fr_l;
             s0_tcolor = C_LABEL;
         end else if (mvis && value_hv) begin
             s0_text   = 1'b1;
             s0_tmenu  = 1'b1;
-            s0_glyph  = g_val(r_page, ridx, vcx[7:5], row_val, mus_total[2:0]);
+            s0_glyph  = g_val(r_page, ridx_l, vcx[7:5], row_val_l, mus_total[2:0]);
             s0_fcol   = vcx[4:1];
-            s0_frow   = row_fr;
+            s0_frow   = row_fr_l;
             s0_tcolor = C_VALUE;
         end else if (mvis && hint_hv) begin
             s0_text   = 1'b1;
