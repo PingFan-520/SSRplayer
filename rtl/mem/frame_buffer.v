@@ -259,7 +259,17 @@ module frame_buffer #(
         if (rst_mem) lm_sync <= 2'b00;
         else         lm_sync <= {lm_sync[0], load_mode};
     end
-    wire wr_ok = (rf_used >= 12'd768) | lm_sync[1];
+    // ★ 门控结果寄存一拍再进"写突发启动"条件。
+    //   rf_used 是从写域看读指针（rgray 同步过来的格雷码）算的，本身就在
+    //   125MHz 下走得慢；直接进突发启动组合逻辑会串成
+    //   "读指针跨时钟 -> rf_used -> wr_ok -> 突发启动 -> bi" 一条 8.9ns 的链
+    //   （50Hz 版实测 -0.973ns）。门控是"水位粗判"，延迟一拍毫无影响。
+    reg wr_ok_q;
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem) wr_ok_q <= 1'b1;
+        else         wr_ok_q <= (rf_used >= 12'd768) | lm_sync[1];
+    end
+    wire wr_ok = wr_ok_q;
     assign wpop  = wf_rd;
 
     wire [31:0] bsel = (bi == 2'd0) ? bb0 :
@@ -390,12 +400,13 @@ module frame_buffer #(
     //   丢掉 N 个字 -> 之后所有像素提前 N 个字 -> 整幅图纵向错 N/480 行，
     //   而且每帧丢的个数不同 -> 上板看到的"整幅画面上下轻微跳动/错行"。
     //   1024 字 ≈ 73us 的消耗量，读写带宽差 5 倍以上，留这么多完全够。
-    // 30Hz 下每帧取 540x480 字 / 33ms ≈ 7.8M 字/s，这一组参数是上板验证过的：
-    //   预灌门限 1024（FIFO 2048，留一半余量吸收写突发）；
-    //   读突发只在 wq==63 这一个时隙发起（1/64 拍），与写突发（rq==63）互斥。
+    // 50Hz 下每帧要取 540x480 字 / 20ms ≈ 13M 字/s（30Hz 只需 7.8M），所以：
+    //   ① 预灌门限 1024 -> 1536（FIFO 有 2048）；
+    //   ② 读突发不再只认 wq==63 这一个时隙（1/64 拍），改成 wq[5]（1/2 拍）；
+    //   写突发仍按 rq==63 的时隙走，两者靠 ~bsend / ~app_busy 互斥，读侧优先。
     wire rstart = ~wr_win_m & app_init_done & ~app_ref_vld & ~app_busy &
-                  (rf_used_r < 12'd1024) & ~rf_full & ~rburst & (rgap == 4'd0) &
-                  ~bsend & (wq == 6'd63);
+                  (rf_used_r < 12'd1536) & ~rf_full & ~rburst & (rgap == 4'd0) &
+                  ~bsend & wq[5];
 
     always @(posedge clk_mem or posedge rst_mem) begin
         if (rst_mem) begin

@@ -82,7 +82,11 @@ module audio_meter #(
             dhi_r <= dhi; dlo_r <= dlo;
             sx_r  <= cdx[12];
             sy_r  <= cdy[12];
-            rsq_r <= (ax * ax) + (ay * ay);
+            // ★ 平方移到下一拍再算（用已经寄存的 ax_r/ay_r）。
+            //   原来写成 rsq_r <= ax*ax + ay*ay，把
+            //   "x -> cdx(减) -> ax(取绝对值再加) -> 乘法 -> 加法 -> rsq_r"
+            //   串成 14 级，50MHz（20ns）下差 0.168ns。拆开后两级各自都在 10ns 内。
+            rsq_r <= (ax_r * ax_r) + (ay_r * ay_r);
         end
     end
 
@@ -104,7 +108,14 @@ module audio_meter #(
                                    : ((ax_r >= ay_r) ? 3'd0 : 3'd1));
     wire [4:0]  cbin = {oct, 2'b00} + {3'd0, csub};
 
-    wire [7:0]  clv  = bars[{cbin, 3'b000} +: 8];
+    // 扇区索引打一拍，与 rsq_r（下一拍才有平方和）对齐
+    reg  [4:0]  cbin_r;
+    always @(posedge clk or posedge rst) begin
+        if (rst) cbin_r <= 5'd0;
+        else     cbin_r <= cbin;
+    end
+
+    wire [7:0]  clv  = bars[{cbin_r, 3'b000} +: 8];
     // rdiff < (level<<8) 一次比较同时判断"在内圆外"和"在柱长内"
     // （rsq < R^2 时 rdiff 回绕成极大值，天然不满足）
     wire [23:0] rdiff = rsq_r - 24'd8100;
@@ -160,7 +171,9 @@ module audio_meter #(
     wire bar_ok  = in_area & ~ingap & filled;
     wire filled_ok = enable & (style ? cfilled : bar_ok);
 
-    // 两级流水：圆形频谱里有 2 个乘法 + 32:1 选择，一级不够（clk_pix 只剩 0.07ns）。
+    // 三级流水：圆形频谱有 2 个乘法 + 32:1 选择，两级也不够（50MHz 下差 0.168ns），
+    //   平方和与扇区索引各占一级，比较/配色再占一级。圆形比条形多 1 拍，
+    //   图案是以 (640,360) 为圆心的对称图形，1 像素偏移看不出来。
     // 上层改用 xd2/yd2（比视频早两拍）送坐标，总延迟仍是 4 拍，与视频对齐。
     reg        p_on;
     reg [23:0] p_rgb;
