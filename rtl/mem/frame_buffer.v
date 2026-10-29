@@ -242,6 +242,24 @@ module frame_buffer #(
     //   旧写法把两者绑在一起，导致读一张图时源被限成"每帧 256 像素"，
     //   一张 960x540 要等上千帧（这就是切图几十秒的根因）。
     assign wf_rd = ~wf_empty & ~a_vld & ~wfly;
+
+    // ------------------------------------------------------------------
+    // 读优先：显示侧读 FIFO 见底时，写突发先让路。
+    //   背景：清屏 / 读图产生的写突发会长时间占住 SDRAM，而读侧按 (wq==63)
+    //   的**固定时隙**取数；时隙一旦被 app_busy 挡掉，就要再等 64 拍。
+    //   读 FIFO 只有 1024 字（≈2 行），连丢几个时隙就会饿死 ——
+    //   上板表现正是"按下切屏那一瞬间画面撕裂"。
+    //   sim/tb_tear.v 复现：整帧后台写入期间 77 万像素里 77 万错、starve 28.9 万。
+    //   这里让写侧在 FIFO 水位 < 768 时暂停；首张 / 单缓冲时 load_mode=1，
+    //   读侧本来就关着，不受这个门控。
+    // ------------------------------------------------------------------
+    wire [11:0] rf_used;
+    reg  [1:0]  lm_sync;
+    always @(posedge clk_mem or posedge rst_mem) begin
+        if (rst_mem) lm_sync <= 2'b00;
+        else         lm_sync <= {lm_sync[0], load_mode};
+    end
+    wire wr_ok = (rf_used >= 12'd768) | lm_sync[1];
     assign wpop  = wf_rd;
 
     wire [31:0] bsel = (bi == 2'd0) ? bb0 :
@@ -288,7 +306,7 @@ module frame_buffer #(
             end else if (bgap != 4'd0) begin
                 bgap <= bgap - 4'd1;
             end else if (bfull && app_init_done && ~app_ref_vld && ~app_busy &&
-                         (rq == 6'd63) && ~rburst) begin
+                         (rq == 6'd63) && ~rburst && wr_ok) begin
                 bsend <= 1'b1;
                 bi    <= 2'd0;
                 bn    <= 3'd0;
@@ -322,7 +340,6 @@ module frame_buffer #(
     reg  [31:0] rd_cap;
     wire [31:0] rf_dout;
 
-    wire [11:0] rf_used;
     afifo #(.DW(32), .AW(11)) u_rfifo (
         .clk_w(clk_mem), .clk_r(pix_clk), .aclr(wr_win_m | pix_rst),
         .wr_en(rf_wr), .wr_data(rd_cap), .wr_full(rf_full),

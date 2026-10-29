@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""一键生成 docs/作品报告_音乐相框.docx：
+"""一键生成 docs/作品报告_万象智屏.docx：
    模板副本 -> 清空正文 -> 分段写 markdown + 插图 -> 拆图段 -> 排版 -> 保存 -> 修 Normal 对齐。"""
 import json
 import os
@@ -12,7 +12,7 @@ import zipfile
 SKILL = r"E:/workbuddy/resources/app.asar.unpacked/resources/plugins/workbuddy-builtin/skills/workbuddy-local-office-edit"
 EDS = os.path.join(SKILL, "edsdk.py")
 BASE = "D:/Work/fpga/yuanshen/docs"
-DOC = f"{BASE}/作品报告_音乐相框.docx"
+DOC = f"{BASE}/作品报告_万象智屏.docx"
 TPL = "C:/Users/28966/Desktop/作品报告（模板）.docx"
 
 

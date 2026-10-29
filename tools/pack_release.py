@@ -2,7 +2,7 @@
 """把可交付的最小项目文件集复制到新文件夹，并打成 zip。
 
 用法： python tools/pack_release.py [目标根目录]
-默认输出 D:/Work/fpga/yuanshen/dist/声影相框_精简包_<日期>/
+默认输出 D:/Work/fpga/yuanshen/dist/万象智屏_精简包_<日期>/
 """
 import os
 import shutil
@@ -12,7 +12,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATE = time.strftime("%Y%m%d")
-NAME = f"声影相框_精简包_{DATE}"
+NAME = f"万象智屏_精简包_{DATE}"
 DEST_ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "dist")
 DEST = os.path.join(DEST_ROOT, NAME)
 
@@ -58,7 +58,7 @@ def copy_rule(sub, patterns, recursive):
     return n
 
 
-README = """# 声影相框 —— 基于安路 EG4S20 的 HDMI 音乐相框
+README = """# 万象智屏 —— 基于安路 EG4S20 的多功能智能显示广告牌
 
 精简工程包（{date}）。本包只保留**能重建、能上板、能答辩**的最小文件集，
 日志、仿真工作目录、临时波形与音视频大文件均已剔除。
@@ -72,7 +72,7 @@ README = """# 声影相框 —— 基于安路 EG4S20 的 HDMI 音乐相框
 | `prj/yuanshen_hdmi.al` | TD 工程文件（器件、源文件列表、编译选项） | 必需 |
 | `sim/` | 20+ 个测试台与批处理（`run_*.bat`），不含 work 目录 | 调试用 |
 | `tools/` | 图片/音频转换、仿真批处理、报告配图与打包脚本 | 辅助 |
-| `docs/` | 25 篇设计文档 + 《作品报告_音乐相框.docx》 + 配图 | 答辩用 |
+| `docs/` | 25 篇设计文档 + 《作品报告_万象智屏.docx》 + 配图 | 答辩用 |
 | `bit/*.bit` | 已综合布线的码流，可直接烧 Flash | 上板用 |
 | `sd_card/` | 已转好的 5 张 960×540 BMP，拷到卡根目录即可 | 可选 |
 | `赛题要求.txt` | 赛题原始要求 | 参考 |
