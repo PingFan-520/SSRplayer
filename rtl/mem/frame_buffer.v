@@ -33,7 +33,15 @@ module frame_buffer #(
     // 存储区：960x540（2 像素/32bit 字）
     parameter integer SW          = 960,
     parameter integer SH          = 540,
-    parameter integer WR_LINES    = 16        // 帧首写窗口行数
+    parameter integer WR_LINES    = 16,       // 帧首写窗口行数
+    // ★ 读侧输出映射：
+    //   0 = 960x540 -> 1280x720 的 4:3 上采样（720p 输出用）
+    //   1 = 1:1 直出（960x540 输出用：每行 480 字 = 960 像素，每行源行只取一次）
+    //   为什么需要 1:1：PLL 只能出 37.5/50/75MHz 像素时钟，而 720p60 要 74.25MHz。
+    //   要跑到 60Hz（显示器接受的刷新率下限）只能用 37.5MHz，
+    //   => 每帧只够 625000 像素，1280x720（921600）放不下，退到 960x540（518400）。
+    //   960x540 正好是 16:9，且与帧缓存同尺寸，1:1 直出无缩放、画质最好。
+    parameter integer RS_1TO1     = 0
 )(
     // ---------------- SDRAM App 接口 ----------------
     output wire [20:0] app_wr_addr,
@@ -92,6 +100,7 @@ module frame_buffer #(
     // 双缓冲最大占用：518400 字 = 2,073,600 字节 < 2MB ✔（余 23KB）
     localparam integer WR_END = WR_LINES;             // 写窗口：帧行 0..15
     localparam integer PRE_END = V_OFFSET;            // 预灌：帧行 16..24
+    localparam integer ROW_MAX = RS_1TO1 ? 539 : 719; // 读侧显示行上限
 
     // ==================================================================
     // 像素域：两像素拼成一个 32bit 字
@@ -453,13 +462,14 @@ module frame_buffer #(
                 // 每个 rd_go 拍产生**一个字**（4 拍 burst = 4 个字）
                 if (rcol == 10'd479) begin
                     rcol <= 10'd0;
-                    if (rout == 10'd719) begin
+                    if (rout == ROW_MAX) begin
                         rout <= 10'd0;
                         rrow <= 10'd0;
                     end else begin
                         rout <= rout + 10'd1;
-                        // 显示行 0/4/8... 之后的下一行重复同一条源行
-                        if (rout[1:0] != 2'd0)
+                        // 4:3 上采样：显示行 0/4/8... 之后的下一行重复同一条源行
+                        // 1:1 直出  ：每行都换源行
+                        if (RS_1TO1 || (rout[1:0] != 2'd0))
                             rrow <= rrow + 10'd1;
                     end
                 end else begin
@@ -478,10 +488,12 @@ module frame_buffer #(
     reg        primed;
 
     wire [12:0] sx3  = {1'b0, x} + {1'b0, x, 1'b0};     // 3x，最大 3837
-    wire [11:0] spx  = sx3[12:2];                       // (3x)>>2
-    wire        half = spx[0];
     wire [12:0] sx3n = sx3 + 13'd3;
-    wire        pop  = de && (sx3n[12:3] != sx3[12:3]); // 下一拍字号变化
+    // 1:1：源像素 = x；4:3：源像素 = (3x)>>2
+    wire [11:0] spx  = RS_1TO1 ? x[11:0] : sx3[12:2];
+    wire        half = spx[0];
+    // pop = "下一个像素要换字"：1:1 时 x 为奇数；4:3 时 (3(x+1))>>3 跨字
+    wire        pop  = de && (RS_1TO1 ? x[0] : (sx3n[12:3] != sx3[12:3]));
 
     assign rf_rd   = (~de & ~primed & ~rf_empty) |
                      (de & pop & ~rf_empty);
